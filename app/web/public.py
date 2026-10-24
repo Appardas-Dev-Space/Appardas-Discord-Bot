@@ -48,7 +48,7 @@ async def landing(request: web.Request) -> web.Response:
     bot = request.app["bot"]
     account = await get_request_account(request)
     snapshot = await bot.status_service.public_snapshot()
-    return public_html(request, landing_page(snapshot, bot.manifest, invite_url(bot), account=account), title="A Discord bot, with a record", description="Five cogs in one process: GitHub watches, announcements, nudges, settings and live status.", version=snapshot["checked_at"] + bot.manifest["version"], close=True, account=account)
+    return public_html(request, landing_page(snapshot, bot.manifest, invite_url(bot), account=account), title="Internal Operations", description="Proprietary operational Discord bot and system telemetry for Appardas.", version=snapshot["checked_at"] + bot.manifest["version"], close=True, account=account)
 
 
 async def commands(request: web.Request) -> web.Response:
