@@ -233,9 +233,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         except ValueError:
             errors.append(f"DISCORD_DEV_GUILD_ID: expected a guild ID, got {dev_guild_raw!r}")
 
-    # PORT wins over HTTP_PORT which wins over 8080.
-    port_raw = _raw(env, "PORT") or _raw(env, "HTTP_PORT")
-    http_port = _as_int(port_raw, "PORT/HTTP_PORT", errors, 8080, minimum=1, maximum=65535)
+    # PORT or Pterodactyl's SERVER_PORT wins over HTTP_PORT which wins over 8080.
+    port_raw = _raw(env, "PORT") or _raw(env, "SERVER_PORT") or _raw(env, "HTTP_PORT")
+    http_port = _as_int(port_raw, "PORT/SERVER_PORT/HTTP_PORT", errors, 8080, minimum=1, maximum=65535)
 
     http_host = _raw(env, "HTTP_HOST") or "0.0.0.0"
     if http_host not in ("0.0.0.0", "127.0.0.1", "::", "::1", "localhost"):
@@ -254,7 +254,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         errors.append(f"ENVIRONMENT: expected one of {ENVIRONMENTS}, got {environment!r}")
 
     production = environment == "production"
-    cookie_secure = _as_bool(_raw(env, "COOKIE_SECURE"), "COOKIE_SECURE", errors, True)
+    cookie_secure = _as_bool(_raw(env, "COOKIE_SECURE"), "COOKIE_SECURE", errors, production)
     trust_proxy = _as_bool(_raw(env, "TRUST_PROXY"), "TRUST_PROXY", errors, False)
     public_base_url = _raw(env, "PUBLIC_BASE_URL")
     if not public_base_url:

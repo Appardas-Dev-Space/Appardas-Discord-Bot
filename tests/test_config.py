@@ -26,6 +26,17 @@ def test_port_resolution_prefers_port_over_http_port():
     assert cfg.http_port == 9000
 
 
+def test_port_resolution_prefers_server_port_over_http_port():
+    cfg = load_settings(
+        {
+            **LOCAL,
+            "SERVER_PORT": "14337",
+            "HTTP_PORT": "8080",
+        }
+    )
+    assert cfg.http_port == 14337
+
+
 def test_invalid_port_is_rejected():
     with pytest.raises(ConfigError) as excinfo:
         load_settings({"DISCORD_TOKEN": "x", "BOT_OWNER_IDS": "1", "HTTP_PORT": "99999"})
