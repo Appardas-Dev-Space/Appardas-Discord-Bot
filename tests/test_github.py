@@ -106,3 +106,25 @@ def test_stale_state(cfg):
     assert service.display_state(watch) == "quiet"
     watch["state"] = "missing"
     assert service.display_state(watch) == "missing"
+
+
+def test_is_newer_handles_sharded_github_id_spaces():
+    from app.services.github import _cursor_key, _is_newer, _serialize_cursor
+
+    # Case: Old CreateEvent has ID 25B (e.g. 25028689861 at 08:39 UTC)
+    # New IssuesEvent has ID 18B (e.g. 18108572207 at 14:49 UTC)
+    old_event = {"id": "25028689861", "created_at": "2026-10-24T08:39:46Z", "type": "CreateEvent"}
+    new_event = {"id": "18108572207", "created_at": "2026-10-24T14:49:48Z", "type": "IssuesEvent"}
+
+    cursor_str = _serialize_cursor(old_event)
+    assert cursor_str == "2026-10-24T08:39:46Z|25028689861"
+
+    cursor_time, cursor_id = _cursor_key(cursor_str)
+    assert _is_newer(new_event, cursor_time, cursor_id) is True
+    assert _is_newer(old_event, cursor_time, cursor_id) is False
+
+    # Same timestamp tie-breaking by ID
+    event_a = {"id": "100", "created_at": "2026-10-24T15:00:00Z"}
+    event_b = {"id": "101", "created_at": "2026-10-24T15:00:00Z"}
+    assert _is_newer(event_b, "2026-10-24T15:00:00Z", 100) is True
+    assert _is_newer(event_a, "2026-10-24T15:00:00Z", 100) is False
