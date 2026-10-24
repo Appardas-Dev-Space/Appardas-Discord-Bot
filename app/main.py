@@ -376,7 +376,7 @@ class AppBot(commands.Bot):
                     status="success",
                 )
                 interaction.extras["command_log_id"] = log_id
-        await super().on_interaction(interaction)
+
 
     async def on_command(self, ctx: commands.Context) -> None:
         if self.command_log is not None:
