@@ -185,7 +185,11 @@ def _public_url(value: str, errors: list[str], *, production: bool, secure: bool
         parsed = urlsplit("")
     if not valid:
         errors.append("PUBLIC_BASE_URL: must be an origin with no trailing slash, path, query, or credentials")
-    local = parsed.hostname in ("localhost", "127.0.0.1", "::1")
+    local = parsed.hostname in ("localhost", "127.0.0.1", "::1") or bool(
+        not production and parsed.hostname and (
+            parsed.hostname.endswith(".wisp.uno") or parsed.hostname.replace(".", "").isdigit()
+        )
+    )
     if production and (parsed.scheme != "https" or local):
         errors.append("PUBLIC_BASE_URL: production requires a public HTTPS hostname")
     if parsed.scheme == "http" and (production or not local or secure):
@@ -233,9 +237,9 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         except ValueError:
             errors.append(f"DISCORD_DEV_GUILD_ID: expected a guild ID, got {dev_guild_raw!r}")
 
-    # PORT wins over HTTP_PORT which wins over 8080.
-    port_raw = _raw(env, "PORT") or _raw(env, "HTTP_PORT")
-    http_port = _as_int(port_raw, "PORT/HTTP_PORT", errors, 8080, minimum=1, maximum=65535)
+    # PORT or Pterodactyl's SERVER_PORT wins over HTTP_PORT which wins over 8080.
+    port_raw = _raw(env, "PORT") or _raw(env, "SERVER_PORT") or _raw(env, "HTTP_PORT")
+    http_port = _as_int(port_raw, "PORT/SERVER_PORT/HTTP_PORT", errors, 8080, minimum=1, maximum=65535)
 
     http_host = _raw(env, "HTTP_HOST") or "0.0.0.0"
     if http_host not in ("0.0.0.0", "127.0.0.1", "::", "::1", "localhost"):
@@ -254,7 +258,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         errors.append(f"ENVIRONMENT: expected one of {ENVIRONMENTS}, got {environment!r}")
 
     production = environment == "production"
-    cookie_secure = _as_bool(_raw(env, "COOKIE_SECURE"), "COOKIE_SECURE", errors, True)
+    cookie_secure = _as_bool(_raw(env, "COOKIE_SECURE"), "COOKIE_SECURE", errors, production)
     trust_proxy = _as_bool(_raw(env, "TRUST_PROXY"), "TRUST_PROXY", errors, False)
     public_base_url = _raw(env, "PUBLIC_BASE_URL")
     if not public_base_url:

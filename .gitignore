@@ -56,3 +56,5 @@ archive/
 .taste-skill/
 scratch/
 tmp/
+*.zip
+*.tar.gz

@@ -30,6 +30,7 @@ from .services.announcements import AnnouncementService
 from .services.audit import AuditService
 from .services.accounts import AccountsService
 from .services.activity import ActivityService
+from .services.commands import CommandLogService
 from .services.github import GitHubService
 from .services.nudge import NudgeService
 from .services.settings import SettingsService
@@ -62,6 +63,7 @@ class AppBot(commands.Bot):
         self.db: Database | None = None
         self.settings_service: SettingsService | None = None
         self.audit: AuditService | None = None
+        self.command_log: CommandLogService | None = None
         self.announcements: AnnouncementService | None = None
         self.nudges: NudgeService | None = None
         self.github: GitHubService | None = None
@@ -89,6 +91,7 @@ class AppBot(commands.Bot):
         self.activity_service = ActivityService(self.db, trust_proxy=cfg.trust_proxy)
         self.sessions = Sessions(self.db, cfg)
         self.audit = AuditService(self.db)
+        self.command_log = CommandLogService(self.db)
         self.settings_service = SettingsService(
             self.db, cfg, self.audit, faults=self.cog_faults, event_bus=self.event_bus
         )
@@ -162,6 +165,24 @@ class AppBot(commands.Bot):
             raise
         finally:
             self.refresh_manifest()
+
+    async def update_presence(
+        self,
+        text: str | None = None,
+        type: str | None = None,
+        status: str | None = None,
+        *,
+        conn: Any = None,
+    ) -> dict[str, Any]:
+        if self.status_service is None:
+            raise RuntimeError("status service not ready")
+        info = await self.status_service.set_presence(text=text, type=type, status=status, conn=conn)
+        activity = self.status_service.build_activity(info["text"], info["type"])
+        discord_status = self.status_service.resolve_status(info["status"])
+        if getattr(self, "ws", None) is not None:
+            with contextlib.suppress(Exception):
+                await self.change_presence(activity=activity, status=discord_status)
+        return info
 
     async def setup_hook(self) -> None:
         await self.prepare()
@@ -268,16 +289,25 @@ class AppBot(commands.Bot):
                     await self.settings_service.ensure_guild(guild.id, guild.name)
             with contextlib.suppress(Exception):
                 await self.settings_service.seed_defaults()
-        activity_type = {
-            "playing": discord.ActivityType.playing,
-            "watching": discord.ActivityType.watching,
-            "listening": discord.ActivityType.listening,
-            "competing": discord.ActivityType.competing,
-        }.get(self.cfg.activity_type, discord.ActivityType.watching)
-        with contextlib.suppress(Exception):
-            await self.change_presence(
-                activity=discord.Activity(type=activity_type, name=self.cfg.activity_text)
+        if self.status_service is not None:
+            presence_info = await self.status_service.get_presence()
+            activity = self.status_service.build_activity(
+                presence_info["text"], presence_info["type"]
             )
+            discord_status = self.status_service.resolve_status(presence_info["status"])
+            with contextlib.suppress(Exception):
+                await self.change_presence(activity=activity, status=discord_status)
+        else:
+            activity_type = {
+                "playing": discord.ActivityType.playing,
+                "watching": discord.ActivityType.watching,
+                "listening": discord.ActivityType.listening,
+                "competing": discord.ActivityType.competing,
+            }.get(self.cfg.activity_type, discord.ActivityType.watching)
+            with contextlib.suppress(Exception):
+                await self.change_presence(
+                    activity=discord.Activity(type=activity_type, name=self.cfg.activity_text)
+                )
         if self.status_service is not None:
             await self.status_service.record_heartbeat(True)
             await self.status_service.refresh()
@@ -306,6 +336,71 @@ class AppBot(commands.Bot):
                 target=guild.name,
                 detail={"source": "system"},
             )
+
+    # ----------------------------------------------------------- command hooks
+    def _extract_interaction_command(
+        self, data: dict[str, Any] | None
+    ) -> tuple[str, dict[str, Any]]:
+        if not data:
+            return "unknown", {}
+        parts = [data.get("name", "unknown")]
+        options = data.get("options", [])
+        while options and len(options) == 1 and options[0].get("type") in (1, 2):
+            parts.append(options[0].get("name", ""))
+            options = options[0].get("options", [])
+        args = {}
+        for opt in options:
+            if "name" in opt:
+                args[opt["name"]] = opt.get("value")
+        return " ".join(parts), args
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        if (
+            interaction.type == discord.InteractionType.application_command
+            and self.command_log is not None
+        ):
+            cmd_name, opts = self._extract_interaction_command(interaction.data)
+            user_name = (
+                f"{interaction.user.name}#{interaction.user.discriminator}"
+                if getattr(interaction.user, "discriminator", "0") not in ("0", None, "")
+                else interaction.user.name
+            )
+            with contextlib.suppress(Exception):
+                log_id = await self.command_log.record(
+                    guild_id=interaction.guild_id,
+                    channel_id=interaction.channel_id,
+                    user_id=interaction.user.id,
+                    user_name=user_name,
+                    command=cmd_name,
+                    options=opts,
+                    status="success",
+                )
+                interaction.extras["command_log_id"] = log_id
+        await super().on_interaction(interaction)
+
+    async def on_command(self, ctx: commands.Context) -> None:
+        if self.command_log is not None:
+            user_name = (
+                f"{ctx.author.name}#{ctx.author.discriminator}"
+                if getattr(ctx.author, "discriminator", "0") not in ("0", None, "")
+                else ctx.author.name
+            )
+            cmd_name = ctx.command.qualified_name if ctx.command else (ctx.invoked_with or "unknown")
+            opts = {
+                "args": [str(a) for a in ctx.args[2:]],
+                "kwargs": {k: str(v) for k, v in ctx.kwargs.items()},
+            }
+            with contextlib.suppress(Exception):
+                log_id = await self.command_log.record(
+                    guild_id=ctx.guild.id if ctx.guild else None,
+                    channel_id=ctx.channel.id if ctx.channel else None,
+                    user_id=ctx.author.id,
+                    user_name=user_name,
+                    command=cmd_name,
+                    options=opts,
+                    status="success",
+                )
+                setattr(ctx, "command_log_id", log_id)
 
     # ----------------------------------------------------------------- loops
     def _start_scheduler(self) -> None:
@@ -473,6 +568,13 @@ class AppBot(commands.Bot):
         # Hybrid callbacks can wrap an app-command invocation error as well.
         while isinstance(original, (commands.HybridCommandError, commands.CommandInvokeError, app_commands.CommandInvokeError)):
             original = original.original
+        if self.command_log is not None and hasattr(ctx, "command_log_id"):
+            log_id = getattr(ctx, "command_log_id")
+            if log_id:
+                status = "denied" if isinstance(original, (commands.CheckFailure, app_commands.CheckFailure)) else "error"
+                with contextlib.suppress(Exception):
+                    await self.command_log.set_status(log_id, status)
+
         if isinstance(original, (commands.CommandOnCooldown, app_commands.CommandOnCooldown)):
             await self._reply_error(ctx, f"Slow down — retry in {original.retry_after:.1f}s.")
             return
@@ -506,6 +608,12 @@ class AppBot(commands.Bot):
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
         original = error.original if isinstance(error, app_commands.CommandInvokeError) else error
+        if self.command_log is not None:
+            log_id = interaction.extras.get("command_log_id")
+            if log_id:
+                status = "denied" if isinstance(original, (app_commands.CheckFailure, app_commands.MissingPermissions)) else "error"
+                with contextlib.suppress(Exception):
+                    await self.command_log.set_status(log_id, status)
         if isinstance(original, app_commands.CheckFailure):
             await self._reply_error(interaction, str(original) or "You cannot use this command.")
             return

@@ -135,6 +135,18 @@ COMMANDS: dict[str, dict[str, object]] = {
         "examples": ["/appardas dump-commands"],
         "failures": "Refuses to write when a command has no entry in app/commands_docs.py.",
     },
+    "appardas presence": {
+        "cog": "status",
+        "usage": "/appardas presence <text> [type] [status]",
+        "description": "Dynamically change the bot status bio, activity text and online state.",
+        "permissions": "owner",
+        "examples": [
+            "/appardas presence text:⚠️ Production Degraded - Investigating status:dnd",
+            "/appardas presence text:/appardas help type:watching status:online",
+            "/appardas presence text:reset",
+        ],
+        "failures": "Text cannot be empty. Passing reset restores default configuration from the environment.",
+    },
     # ------------------------------------------------------------ settings
     "settings cogs": {
         "cog": "settings",
@@ -182,6 +194,18 @@ COMMANDS: dict[str, dict[str, object]] = {
         "permissions": "manage_guild",
         "examples": ["/settings audit", "/settings audit limit:25"],
         "failures": "Rows older than AUDIT_RETENTION_DAYS (90) are pruned daily; history after that point is genuinely gone.",
+    },
+    "settings presence": {
+        "cog": "settings",
+        "usage": "/settings presence <text> [type] [status]",
+        "description": "Dynamically change the bot status bio and activity for production notices or maintenance.",
+        "permissions": "manage_guild",
+        "examples": [
+            "/settings presence text:⚠️ Maintenance in progress status:idle",
+            "/settings presence text:/appardas help type:watching",
+            "/settings presence text:reset",
+        ],
+        "failures": "Requires Manage Server permission. Passing reset restores default configuration.",
     },
     # -------------------------------------------------------------- github
     "github watch": {

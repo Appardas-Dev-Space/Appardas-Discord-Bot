@@ -300,6 +300,62 @@ class SettingsCog(commands.Cog):
         embed.set_footer(text=f"Showing {len(rows)} · retained {self.bot.cfg.audit_retention_days} days")
         await ctx.send(embed=embed, ephemeral=True)
 
+    @settings_group.command(
+        name="presence",
+        description="Update bot status bio and activity dynamically (for production notices).",
+    )
+    @app_commands.describe(
+        text="Status text, or 'reset' to revert to default config.",
+        type="Activity prefix: custom (text only), watching, playing, listening, competing.",
+        status="Online status: online, idle, dnd, invisible.",
+    )
+    @app_commands.choices(
+        type=[
+            app_commands.Choice(name="custom (text only, bio)", value="custom"),
+            app_commands.Choice(name="watching", value="watching"),
+            app_commands.Choice(name="playing", value="playing"),
+            app_commands.Choice(name="listening", value="listening"),
+            app_commands.Choice(name="competing", value="competing"),
+        ],
+        status=[
+            app_commands.Choice(name="online (green)", value="online"),
+            app_commands.Choice(name="idle (orange/moon)", value="idle"),
+            app_commands.Choice(name="dnd (red/do not disturb)", value="dnd"),
+            app_commands.Choice(name="invisible (offline)", value="invisible"),
+        ],
+    )
+    @app_commands.default_permissions(manage_guild=True)
+    async def presence(
+        self,
+        ctx: commands.Context,
+        text: str,
+        type: str | None = None,
+        status: str | None = None,
+    ) -> None:
+        await has_manage_guild(ctx)
+        guild = await ensure_guild(ctx)
+        if not hasattr(self.bot, "update_presence"):
+            await ctx.send("Presence updates are not supported by this instance.", ephemeral=True)
+            return
+        info = await self.bot.update_presence(text=text, type=type, status=status)
+        if getattr(self.bot, "audit", None):
+            await self.bot.audit.record(
+                guild_id=guild.id,
+                actor_id=ctx.author.id,
+                action="presence.update",
+                target=info["text"],
+                detail={"text": info["text"], "type": info["type"], "status": info["status"]},
+            )
+        msg = (
+            f"Presence updated:\n"
+            f"• **Text**: `{info['text']}`\n"
+            f"• **Type**: `{info['type']}`\n"
+            f"• **Status**: `{info['status']}`"
+        )
+        if not info.get("is_custom"):
+            msg += "\n*(reverted to default config)*"
+        await ctx.send(msg, ephemeral=True)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(SettingsCog(bot))

@@ -1,6 +1,9 @@
 .public-nav{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:22px var(--gutter);max-width:1600px;margin:auto}
-.wordmark{font-size:24px;letter-spacing:-.06em;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:12px}
-.wordmark .brand-logo{height:28px;width:auto;display:block;object-fit:contain}
+.wordmark{font-size:24px;letter-spacing:-.06em;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap}
+.wordmark .brand-logo{height:26px;width:auto;display:block;object-fit:contain}
+.wordmark .bot-logo{height:28px;width:28px;border-radius:50%}
+.wordmark .brand-sep{color:var(--faint);font-weight:300;margin:0 2px;user-select:none}
+.wordmark .brand-sub{font-weight:500;color:var(--muted);font-size:16px}
 .nav-links{display:flex;align-items:center;gap:28px}
 .nav-links a{min-height:44px;display:inline-flex;align-items:center;text-decoration:none}
 .nav-links a:hover{text-decoration:underline}

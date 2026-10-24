@@ -32,6 +32,7 @@ async def bot(cfg):
         id=1,
         name="Test Guild",
         text_channels=[SimpleNamespace(id=10, name="general")],
+        roles=[SimpleNamespace(id=1, name="@everyone", position=0)],
     )
     yield instance
     await instance.close()
@@ -460,3 +461,167 @@ async def test_sse_cap_is_independent_of_general_connection_slots(client, bot):
     finally:
         for _ in range(app["bot"].cfg.max_connections):
             general.release()
+
+
+async def test_owner_admin_presence_lifecycle(client, bot):
+    # 1. Viewer denied
+    _, viewer_raw = await viewer_session(bot)
+    await sign_in(client, bot, viewer_raw)
+    denied = await client.get("/dashboard/admin/presence")
+    assert denied.status in (302, 403, 404)
+
+    # 2. Owner allowed
+    _, owner_raw = await owner_session(bot)
+    await sign_in(client, bot, owner_raw)
+    get_res = await client.get("/dashboard/admin/presence")
+    assert get_res.status == 200
+    html = await get_res.text()
+    assert "Bot Presence" in html
+    csrf = csrf_from(html)
+
+    # 3. Post new presence
+    post_res = await client.post(
+        "/dashboard/admin/presence",
+        data={
+            "csrf": csrf,
+            "text": "⚠️ Outage Detected - Investigating",
+            "type": "custom",
+            "status": "dnd",
+        },
+    )
+    assert post_res.status in (200, 302, 303)
+    presence = await bot.status_service.get_presence()
+    assert presence["text"] == "⚠️ Outage Detected - Investigating"
+    assert presence["type"] == "custom"
+    assert presence["status"] == "dnd"
+
+    # 4. Reset presence
+    reset_res = await client.post(
+        "/dashboard/admin/presence",
+        data={
+            "csrf": csrf,
+            "action": "reset",
+        },
+    )
+    assert reset_res.status in (200, 302, 303)
+    reset_presence = await bot.status_service.get_presence()
+    assert reset_presence["text"] == bot.cfg.activity_text
+    assert reset_presence["status"] == "online"
+
+
+async def test_dashboard_announcements_and_commands(client, bot):
+    class MockChannel:
+        id = 10
+        name = "general"
+        def __init__(self):
+            self.sent_messages = []
+        async def send(self, **kwargs):
+            self.sent_messages.append(kwargs)
+            return SimpleNamespace(jump_url="https://discord.com")
+
+    mock_ch = MockChannel()
+    bot.get_channel = lambda cid: mock_ch if cid == 10 else None
+
+    # 1. Sign in as owner
+    _, owner_raw = await owner_session(bot)
+    await sign_in(client, bot, owner_raw)
+
+    # 2. GET announcements page
+    res = await client.get("/dashboard/g/1/announcements")
+    assert res.status == 200
+    html = await res.text()
+    assert "Announcements" in html
+    assert "New Announcement" in html
+    csrf = csrf_from(html)
+
+    # 3. POST create scheduled announcement
+    create_res = await client.post(
+        "/dashboard/g/1/announcements",
+        data={
+            "csrf": csrf,
+            "channel_id": "10",
+            "title": "Community Update",
+            "body": "Welcome to our server!",
+            "when": "tomorrow 10:00",
+            "action_type": "schedule",
+            "footer_text": "Official Staff Notice",
+            "fields_text": "Rule 1 | Be respectful\nRule 2 | Have fun",
+            "color": "#5865F2",
+            "ping_role_id": "everyone",
+        },
+    )
+    assert create_res.status in (200, 302, 303)
+    pending = await bot.announcements.list_pending(1)
+    assert len(pending) == 1
+    announcement_id = pending[0]["id"]
+
+    # 4. POST edit announcement
+    edit_res = await client.post(
+        f"/dashboard/g/1/announcements/{announcement_id}/edit",
+        data={
+            "csrf": csrf,
+            "title": "Community Update v2",
+            "body": "Welcome to our upgraded server!",
+            "when": "tomorrow 12:00",
+            "channel_id": "10",
+            "footer_text": "Server Staff Team",
+        },
+    )
+    assert edit_res.status in (200, 302, 303)
+    updated_row = await bot.announcements.get(1, announcement_id)
+    assert "Community Update v2" in updated_row["payload"]
+
+    # 5. POST dispatch now
+    send_res = await client.post(
+        f"/dashboard/g/1/announcements/{announcement_id}/send",
+        data={"csrf": csrf},
+    )
+    assert send_res.status in (200, 302, 303)
+    dispatched_row = await bot.announcements.get(1, announcement_id)
+    assert dispatched_row["status"] == "sent"
+    assert len(mock_ch.sent_messages) == 1
+
+    # 6. POST create and cancel announcement
+    create2_res = await client.post(
+        "/dashboard/g/1/announcements",
+        data={
+            "csrf": csrf,
+            "channel_id": "10",
+            "title": "Temporary Event",
+            "body": "Event details",
+            "when": "in 5 hours",
+            "action_type": "schedule",
+        },
+    )
+    assert create2_res.status in (200, 302, 303)
+    pending2 = await bot.announcements.list_pending(1)
+    assert len(pending2) == 1
+    cancel_id = pending2[0]["id"]
+
+    cancel_res = await client.post(
+        f"/dashboard/g/1/announcements/{cancel_id}/cancel",
+        data={"csrf": csrf},
+    )
+    assert cancel_res.status in (200, 302, 303)
+    cancelled_row = await bot.announcements.get(1, cancel_id)
+    assert cancelled_row["status"] == "cancelled"
+
+    # 7. Record command in command_log and test commands log page
+    await bot.command_log.record(
+        guild_id=1,
+        channel_id=10,
+        user_id=999,
+        user_name="testuser",
+        command="appardas help",
+        options={"topic": "announcements"},
+        status="success",
+    )
+
+    cmd_res = await client.get("/dashboard/g/1/commands")
+    assert cmd_res.status == 200
+    cmd_html = await cmd_res.text()
+    assert "Command Log" in cmd_html
+    assert "appardas help" in cmd_html
+    assert "testuser" in cmd_html
+
+

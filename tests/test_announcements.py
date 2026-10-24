@@ -176,3 +176,77 @@ def test_announcement_embed_builder():
     assert embed2.image.url == "https://example.com/banner.png"
     assert embed2.footer.text == "Message your `admin` to learn more"
 
+
+def test_announcement_embed_with_footer_fields_and_color():
+    from app.views.embeds import announcement_embed
+
+    fields = [
+        {"name": "Field 1", "value": "Val 1", "inline": True},
+        {"name": "Field 2", "value": "Val 2", "inline": False},
+    ]
+    embed = announcement_embed(
+        "Maintenance",
+        "Body text",
+        footer_text="Official Staff Notice",
+        fields=fields,
+        color="#ED4245",
+    )
+    assert embed.footer.text == "Official Staff Notice"
+    assert len(embed.fields) == 2
+    assert embed.fields[0].name == "Field 1"
+    assert embed.fields[0].value == "Val 1"
+    assert embed.fields[0].inline is True
+    assert embed.color.value == 0xED4245
+
+
+async def test_create_with_rich_options_update_and_dispatch_one(announcements, db):
+    channel = FakeChannel()
+    client = FakeClient(channel)
+
+    announcement_id = await announcements.create(
+        guild_id=1,
+        channel_id=10,
+        author_id=100,
+        title="Original Title",
+        body="Original Body",
+        ping_role_id="@everyone",
+        send_at=utcnow() + timedelta(hours=2),
+        footer_text="Custom Footer",
+        fields=[{"name": "Topic", "value": "Details"}],
+        color="#57F287",
+    )
+    assert announcement_id > 0
+
+    # Verify get
+    row = await announcements.get(1, announcement_id)
+    assert row is not None
+    assert row["status"] == "pending"
+
+    # Verify update
+    updated = await announcements.update(
+        guild_id=1,
+        announcement_id=announcement_id,
+        title="Updated Title",
+        body="Updated Body",
+        footer_text="New Footer",
+    )
+    assert updated is True
+
+    # Verify dispatch_one
+    dispatched = await announcements.dispatch_one(client, announcement_id)
+    assert dispatched is True
+    assert len(channel.sent) == 1
+    sent = channel.sent[0]
+    assert sent["content"] == "@everyone"
+    assert "Updated Title" in sent["embed"].title
+    assert sent["embed"].footer.text == "New Footer"
+
+    # Check status changed to sent
+    row = await announcements.get(1, announcement_id)
+    assert row["status"] == "sent"
+
+    # Verify list_recent contains this announcement
+    recent = await announcements.list_recent(1)
+    assert any(r["id"] == announcement_id for r in recent)
+
+

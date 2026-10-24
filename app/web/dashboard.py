@@ -15,7 +15,10 @@ from aiohttp import web
 from ..cogs.registry import COGS
 from ..services.activity import record_activity
 from ..services.settings import CHANNEL_KEYS, CONFIG_KEYS, LockedCogError
+from ..util import utcnow
 from .common import WebError, accessible_guilds, authorize, form_data, html, log_denial, mutation, positive_id, saved, wants_json
+from .templates.app.announcements_page import announcements_page
+from .templates.app.commands_page import commands_page
 from .templates.base import layout
 from .templates.pages import SETTING_LABELS, audit_page, cogs_page, notice, overview_page, settings_page, title_row, watches_page
 
@@ -94,6 +97,327 @@ async def dashboard_audit(request: web.Request) -> web.Response:
     return await render(request, "Audit", content, active="audit")
 
 
+async def dashboard_announcements(
+    request: web.Request, *, message: str = "", status: int = 200
+) -> web.Response:
+    bot, guild = request.app["bot"], request["guild"]
+    if not message and request.query.get("saved"):
+        message = f"Announcement {request.query['saved']}."
+    if not message and request.query.get("message"):
+        message = request.query["message"]
+    pending = await bot.announcements.list_pending(guild.id)
+    recent = await bot.announcements.list_recent(guild.id, 25)
+    channels = sorted(guild.text_channels, key=lambda c: c.name.casefold())
+    roles = sorted(guild.roles, key=lambda r: r.position, reverse=True)
+    content = announcements_page(
+        guild=guild,
+        pending=pending,
+        recent=recent,
+        channels=channels,
+        roles=roles,
+        csrf=request["session"].csrf,
+        writable=request["account"].can_write,
+        connected=bot.is_ready(),
+        message=message,
+        error=status >= 400 or request.query.get("error") == "1",
+    )
+    return await render(request, "Announcements", content, active="announcements", status=status, live=True)
+
+
+async def post_announcement(request: web.Request) -> web.Response:
+    bot, guild = request.app["bot"], request["guild"]
+    tz_str = await bot.settings_service.get_setting(guild.id, "timezone") or "UTC"
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        tz = ZoneInfo(tz_str)
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = ZoneInfo("UTC")
+
+    created_id: int | None = None
+    should_dispatch_now: bool = False
+
+    async def operation(conn):
+        nonlocal created_id, should_dispatch_now
+        form = await form_data(request)
+        channel_id_raw = form.get("channel_id")
+        if not channel_id_raw:
+            raise ValueError("Select a destination channel.")
+        channel_id = positive_id(channel_id_raw)
+        title = form.get("title", "").strip()
+        if not title:
+            raise ValueError("Title is required.")
+        body = form.get("body", "").strip()
+        if not body:
+            raise ValueError("Message body is required.")
+
+        when_raw = form.get("when", "now").strip()
+        action_type = form.get("action_type", "schedule")
+
+        if action_type == "send_now" or when_raw.lower() in ("now", "immediately", "0", ""):
+            send_at = utcnow()
+            should_dispatch_now = True
+        else:
+            from ..services.announcements import AnnouncementError, parse_when
+            try:
+                send_at = parse_when(when_raw, tz)
+            except AnnouncementError as err:
+                raise ValueError(str(err)) from err
+
+        ping_role_id = form.get("ping_role_id", "").strip() or None
+        image_url = form.get("image_url", "").strip() or None
+        footer_text = form.get("footer_text", "").strip() or None
+        color = form.get("color", "").strip() or None
+
+        fields = []
+        fields_text = form.get("fields_text", "").strip()
+        if fields_text:
+            for line in fields_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if "|" in line:
+                    fname, _, fval = line.partition("|")
+                    fields.append({"name": fname.strip(), "value": fval.strip(), "inline": False})
+                elif line.startswith("- "):
+                    fields.append({"name": "•", "value": line[2:].strip(), "inline": False})
+                else:
+                    fields.append({"name": "Notice", "value": line, "inline": False})
+
+        author_id = request["account"].discord_user_id or 0
+        created_id = await bot.announcements.create(
+            guild_id=guild.id,
+            channel_id=channel_id,
+            author_id=author_id,
+            title=title,
+            body=body,
+            send_at=send_at,
+            ping_role_id=ping_role_id,
+            image_url=image_url,
+            footer_text=footer_text,
+            fields=fields if fields else None,
+            color=color,
+            source="web",
+            conn=conn,
+        )
+        activity_id = await record_activity(
+            request=request,
+            action="announcement.create",
+            guild_id=guild.id,
+            target=str(created_id),
+            detail={
+                "title": title,
+                "channel_id": channel_id,
+                "send_at": send_at.isoformat(),
+                "immediate": should_dispatch_now,
+            },
+            conn=conn,
+        )
+        return {"id": created_id, "activity_id": activity_id, "message": "Announcement scheduled."}
+
+    try:
+        result = await mutation(request, operation)
+    except Exception as exc:
+        return await _mutation_error(request, exc, action="announcement.create", target=str(guild.id))
+
+    if should_dispatch_now and created_id is not None:
+        try:
+            ok = await bot.announcements.dispatch_one(bot, created_id)
+            msg = "Announcement sent immediately." if ok else "Announcement created, but dispatch failed."
+        except Exception as exc:
+            log.warning("immediate dispatch error: %s", exc)
+            msg = f"Announcement created, but send error: {exc}"
+        return saved(request, f"/dashboard/g/{guild.id}/announcements?" + urlencode({"message": msg}), result)
+
+    return saved(request, f"/dashboard/g/{guild.id}/announcements?" + urlencode({"saved": "scheduled"}), result)
+
+
+async def send_announcement_now(request: web.Request) -> web.Response:
+    bot, guild = request.app["bot"], request["guild"]
+    announcement_id = positive_id(request.match_info["id"])
+
+    async def operation(conn):
+        row = await bot.announcements.get(guild.id, announcement_id, conn=conn)
+        if not row:
+            raise WebError(404, "not_found", "Announcement not found.")
+        if row["status"] != "pending":
+            raise ValueError(f"Cannot dispatch announcement with status '{row['status']}'.")
+        activity_id = await record_activity(
+            request=request,
+            action="announcement.send_now",
+            guild_id=guild.id,
+            target=str(announcement_id),
+            conn=conn,
+        )
+        return {"id": announcement_id, "activity_id": activity_id}
+
+    try:
+        result = await mutation(request, operation)
+    except Exception as exc:
+        return await _mutation_error(request, exc, action="announcement.send_now", target=str(announcement_id))
+
+    ok = await bot.announcements.dispatch_one(bot, announcement_id)
+    msg = "Announcement dispatched." if ok else "Announcement dispatch failed. Check channel permissions."
+    return saved(request, f"/dashboard/g/{guild.id}/announcements?" + urlencode({"message": msg}), result)
+
+
+async def cancel_announcement(request: web.Request) -> web.Response:
+    bot, guild = request.app["bot"], request["guild"]
+    announcement_id = positive_id(request.match_info["id"])
+
+    async def operation(conn):
+        author_id = request["account"].discord_user_id or 0
+        cancelled = await bot.announcements.cancel(guild.id, announcement_id, author_id, conn=conn)
+        if not cancelled:
+            raise WebError(404, "not_found", "Announcement not found or not in pending state.")
+        activity_id = await record_activity(
+            request=request,
+            action="announcement.cancel",
+            guild_id=guild.id,
+            target=str(announcement_id),
+            conn=conn,
+        )
+        return {"id": announcement_id, "activity_id": activity_id, "message": "Announcement cancelled."}
+
+    try:
+        result = await mutation(request, operation)
+    except Exception as exc:
+        return await _mutation_error(request, exc, action="announcement.cancel", target=str(announcement_id))
+
+    return saved(request, f"/dashboard/g/{guild.id}/announcements?" + urlencode({"saved": "cancelled"}), result)
+
+
+async def edit_announcement(request: web.Request) -> web.Response:
+    bot, guild = request.app["bot"], request["guild"]
+    announcement_id = positive_id(request.match_info["id"])
+    tz_str = await bot.settings_service.get_setting(guild.id, "timezone") or "UTC"
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        tz = ZoneInfo(tz_str)
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = ZoneInfo("UTC")
+
+    async def operation(conn):
+        row = await bot.announcements.get(guild.id, announcement_id, conn=conn)
+        if not row:
+            raise WebError(404, "not_found", "Announcement not found.")
+        if row["status"] != "pending":
+            raise ValueError(f"Cannot edit announcement with status '{row['status']}'.")
+
+        form = await form_data(request)
+        channel_id_raw = form.get("channel_id")
+        channel_id = positive_id(channel_id_raw) if channel_id_raw else None
+        title = form.get("title", "").strip() or None
+        body = form.get("body", "").strip() or None
+
+        when_raw = form.get("when", "").strip()
+        send_at = None
+        if when_raw:
+            from ..services.announcements import AnnouncementError, parse_when
+            try:
+                send_at = parse_when(when_raw, tz)
+            except AnnouncementError as err:
+                raise ValueError(str(err)) from err
+
+        ping_role_id = form.get("ping_role_id", "").strip() or None
+        image_url = form.get("image_url", "").strip() or None
+        footer_text = form.get("footer_text", "").strip() or None
+        color = form.get("color", "").strip() or None
+
+        fields = None
+        fields_text = form.get("fields_text", "").strip()
+        if fields_text:
+            fields = []
+            for line in fields_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if "|" in line:
+                    fname, _, fval = line.partition("|")
+                    fields.append({"name": fname.strip(), "value": fval.strip(), "inline": False})
+                elif line.startswith("- "):
+                    fields.append({"name": "•", "value": line[2:].strip(), "inline": False})
+                else:
+                    fields.append({"name": "Notice", "value": line, "inline": False})
+
+        author_id = request["account"].discord_user_id or 0
+        updated = await bot.announcements.update(
+            guild_id=guild.id,
+            announcement_id=announcement_id,
+            actor_id=author_id,
+            title=title,
+            body=body,
+            channel_id=channel_id,
+            send_at=send_at,
+            ping_role_id=ping_role_id,
+            image_url=image_url,
+            footer_text=footer_text,
+            fields=fields,
+            color=color,
+            source="web",
+            conn=conn,
+        )
+        if not updated:
+            raise WebError(400, "cannot_update", "Announcement update failed.")
+
+        activity_id = await record_activity(
+            request=request,
+            action="announcement.update",
+            guild_id=guild.id,
+            target=str(announcement_id),
+            detail={"title": title, "channel_id": channel_id},
+            conn=conn,
+        )
+        return {"id": announcement_id, "activity_id": activity_id, "message": "Announcement updated."}
+
+    try:
+        result = await mutation(request, operation)
+    except Exception as exc:
+        return await _mutation_error(request, exc, action="announcement.update", target=str(announcement_id))
+
+    return saved(request, f"/dashboard/g/{guild.id}/announcements?" + urlencode({"saved": "updated"}), result)
+
+
+async def dashboard_commands(request: web.Request) -> web.Response:
+    bot, guild = request.app["bot"], request["guild"]
+    cmd_filter = request.query.get("command", "")[:100]
+    user_filter_raw = request.query.get("user_id", "").strip()
+    user_id = positive_id(user_filter_raw) if user_filter_raw.isdigit() else None
+    status_filter = request.query.get("status", "")[:20]
+    limit = (
+        int(request.query.get("limit", "50"))
+        if request.query.get("limit", "50") in ("50", "100", "200")
+        else 50
+    )
+    before = (
+        positive_id(request.query["before"])
+        if request.query.get("before") and request.query["before"].isdigit()
+        else None
+    )
+
+    rows = await bot.command_log.tail(
+        guild.id,
+        limit=limit,
+        command=cmd_filter,
+        user_id=user_id,
+        status=status_filter,
+        before=before,
+    )
+    distinct_cmds = await bot.command_log.distinct_commands(guild.id)
+    channels = {channel.id: "#" + channel.name for channel in guild.text_channels}
+
+    content = commands_page(
+        guild=guild,
+        rows=rows,
+        distinct_commands=distinct_cmds,
+        command=cmd_filter,
+        user_id=user_id,
+        status=status_filter,
+        limit=limit,
+        channels=channels,
+    )
+    return await render(request, "Command Log", content, active="commands")
+
+
 async def _mutation_error(request: web.Request, exc: Exception, *, action: str, target: str) -> web.Response:
     from .status import error_response
     if isinstance(exc, WebError):
@@ -111,6 +435,8 @@ async def _mutation_error(request: web.Request, exc: Exception, *, action: str, 
         return error_response(request, failure)
     if action == "cog.toggle":
         return await dashboard_cogs(request, message=failure.message, status=failure.status)
+    if action.startswith("announcement."):
+        return await dashboard_announcements(request, message=failure.message, status=failure.status)
     form = request.get("form", {})
     column = "mod_log_channel" if target == "mod_log" else target
     return await dashboard_settings(request, errors={target: failure.message}, status=failure.status, values={column: form.get("value", "")})
@@ -236,7 +562,18 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/dashboard/status.json", private_status)
     app.router.add_get("/dashboard/events", events, allow_head=False)
     app.router.add_get("/dashboard/g/{guild_id}", dashboard_overview)
-    for path, handler in (("cogs", dashboard_cogs), ("settings", dashboard_settings), ("watches", dashboard_watches), ("audit", dashboard_audit)):
+    for path, handler in (
+        ("announcements", dashboard_announcements),
+        ("cogs", dashboard_cogs),
+        ("settings", dashboard_settings),
+        ("watches", dashboard_watches),
+        ("commands", dashboard_commands),
+        ("audit", dashboard_audit),
+    ):
         app.router.add_get("/dashboard/g/{guild_id}/" + path, handler)
+    app.router.add_post("/dashboard/g/{guild_id}/announcements", post_announcement)
+    app.router.add_post("/dashboard/g/{guild_id}/announcements/{id}/send", send_announcement_now)
+    app.router.add_post("/dashboard/g/{guild_id}/announcements/{id}/cancel", cancel_announcement)
+    app.router.add_post("/dashboard/g/{guild_id}/announcements/{id}/edit", edit_announcement)
     app.router.add_post("/dashboard/g/{guild_id}/cogs/{cog}", toggle_cog)
     app.router.add_post("/dashboard/g/{guild_id}/settings/{key}", set_setting)
