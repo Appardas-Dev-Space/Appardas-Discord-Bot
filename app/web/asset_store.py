@@ -32,6 +32,8 @@ PUBLIC_JS_NAME = _name("public", "js", PUBLIC_JS_BYTES)
 
 LOGO_BYTES = (ASSET_DIR / "appardas-logo.png").read_bytes()
 LOGO_NAME = _name("appardas-logo", "png", LOGO_BYTES)
+APPA_DEV_LOGO_BYTES = (ASSET_DIR / "appa-dev-logo.png").read_bytes()
+APPA_DEV_LOGO_NAME = _name("appa-dev-logo", "png", APPA_DEV_LOGO_BYTES)
 
 ASSETS = {
     FONT_NAME: (FONT_BYTES, "font/woff2"),
@@ -42,4 +44,5 @@ ASSETS = {
     PUBLIC_JS_NAME: (PUBLIC_JS_BYTES, "application/javascript"),
     FAVICON_NAME: (FAVICON_BYTES, "image/svg+xml"),
     LOGO_NAME: (LOGO_BYTES, "image/png"),
+    APPA_DEV_LOGO_NAME: (APPA_DEV_LOGO_BYTES, "image/png"),
 }
