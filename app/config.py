@@ -185,7 +185,11 @@ def _public_url(value: str, errors: list[str], *, production: bool, secure: bool
         parsed = urlsplit("")
     if not valid:
         errors.append("PUBLIC_BASE_URL: must be an origin with no trailing slash, path, query, or credentials")
-    local = parsed.hostname in ("localhost", "127.0.0.1", "::1")
+    local = parsed.hostname in ("localhost", "127.0.0.1", "::1") or bool(
+        not production and parsed.hostname and (
+            parsed.hostname.endswith(".wisp.uno") or parsed.hostname.replace(".", "").isdigit()
+        )
+    )
     if production and (parsed.scheme != "https" or local):
         errors.append("PUBLIC_BASE_URL: production requires a public HTTPS hostname")
     if parsed.scheme == "http" and (production or not local or secure):

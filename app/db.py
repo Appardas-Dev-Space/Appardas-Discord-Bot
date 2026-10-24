@@ -304,19 +304,28 @@ class Database:
         return next(iter(row.values()))
 
     # ------------------------------------------------------------------ meta
-    async def get_meta(self, key: str) -> str | None:
-        row = await self.fetchone("SELECT value FROM meta WHERE key = ?", (key,))
+    async def get_meta(self, key: str, *, conn: sqlite3.Connection | None = None) -> str | None:
+        if conn is not None:
+            row = await self.fetchone_on(conn, "SELECT value FROM meta WHERE key = ?", (key,))
+        else:
+            row = await self.fetchone("SELECT value FROM meta WHERE key = ?", (key,))
         return row["value"] if row else None
 
-    async def set_meta(self, key: str, value: str) -> None:
-        await self.execute(
+    async def set_meta(self, key: str, value: str, *, conn: sqlite3.Connection | None = None) -> None:
+        sql = (
             "INSERT INTO meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value"
         )
+        if conn is not None:
+            await self.execute_on(conn, sql, (key, value))
+        else:
+            await self.execute(sql, (key, value))
 
-    async def delete_meta(self, key: str) -> None:
-        await self.execute("DELETE FROM meta WHERE key = ?", (key,))
+    async def delete_meta(self, key: str, *, conn: sqlite3.Connection | None = None) -> None:
+        if conn is not None:
+            await self.execute_on(conn, "DELETE FROM meta WHERE key = ?", (key,))
+        else:
+            await self.execute("DELETE FROM meta WHERE key = ?", (key,))
 
     # ------------------------------------------------------------------ health
     async def health_check(self) -> bool:

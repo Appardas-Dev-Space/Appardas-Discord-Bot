@@ -8,7 +8,15 @@ from typing import Any
 from ...version import VERSION
 from ..asset_store import CSS_NAME, FONT_NAME, JS_NAME, LOGO_NAME, TOKENS_NAME
 
-NAV = (("overview", "Overview"), ("cogs", "Cogs"), ("settings", "Settings"), ("watches", "Watches"), ("audit", "Audit"))
+NAV = (
+    ("overview", "Overview"),
+    ("announcements", "Announcements"),
+    ("cogs", "Cogs"),
+    ("settings", "Settings"),
+    ("watches", "Watches"),
+    ("commands", "Command Log"),
+    ("audit", "Audit"),
+)
 
 
 def e(value: object) -> str:
@@ -22,7 +30,7 @@ def csrf_field(csrf: str) -> str:
 def layout(*, title: str, active: str, content: str, account: Any, csrf: str, guilds: list[dict], guild: Any = None, verdict: str = "", live: bool = False) -> str:
     base = f"/dashboard/g/{guild.id}" if guild else ""
     nav = "".join(f'<a href="{base}{"/" + key if key != "overview" else ""}"{" aria-current=page" if active == key else ""}>{label}</a>' for key, label in NAV) if guild else '<a href="/dashboard">Servers</a>'
-    admin = '<p class="nav-group">Admin</p><nav aria-label="Administration">' + "".join(f'<a href="/dashboard/admin/{key}"{" aria-current=page" if active == key else ""}>{label}</a>' for key, label in (("accounts", "Accounts"), ("activity", "Activity"))) + '</nav>' if account.role == "owner" else ""
+    admin = '<p class="nav-group">Admin</p><nav aria-label="Administration">' + "".join(f'<a href="/dashboard/admin/{key}"{" aria-current=page" if active == key else ""}>{label}</a>' for key, label in (("accounts", "Accounts"), ("activity", "Activity"), ("presence", "Presence"))) + '</nav>' if account.role == "owner" else ""
     logout = f'<form method="post" action="/logout">{csrf_field(csrf)}<button class="plain-button" type="submit">Sign out</button></form>'
     brand = f'<a class="brand" href="/"><img class="brand-logo" src="/assets/{LOGO_NAME}" alt="appardas" width="28" height="18"><span>appardas</span></a>'
     account_nav = f'<div class="account-nav"><p>{e(account.name)}</p><p class="muted">{e(account.role)}</p>{logout}</div>'

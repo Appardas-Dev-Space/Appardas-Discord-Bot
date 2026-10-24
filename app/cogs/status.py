@@ -369,6 +369,53 @@ class StatusCog(commands.Cog):
             return
         await interaction.followup.send(f"Wrote `{path}`.", ephemeral=True)
 
+    @appardas.command(
+        name="presence", description="Update the bot status bio and activity dynamically."
+    )
+    @app_commands.describe(
+        text="Status text, or 'reset' to revert to default config.",
+        type="Activity prefix: custom (text only), watching, playing, listening, competing.",
+        status="Online status: online, idle, dnd, invisible.",
+    )
+    @app_commands.choices(
+        type=[
+            app_commands.Choice(name="custom (text only, bio)", value="custom"),
+            app_commands.Choice(name="watching", value="watching"),
+            app_commands.Choice(name="playing", value="playing"),
+            app_commands.Choice(name="listening", value="listening"),
+            app_commands.Choice(name="competing", value="competing"),
+        ],
+        status=[
+            app_commands.Choice(name="online (green)", value="online"),
+            app_commands.Choice(name="idle (orange/moon)", value="idle"),
+            app_commands.Choice(name="dnd (red/do not disturb)", value="dnd"),
+            app_commands.Choice(name="invisible (offline)", value="invisible"),
+        ],
+    )
+    @app_commands.check(is_owner)
+    async def appardas_presence(
+        self,
+        interaction: discord.Interaction,
+        text: str,
+        type: str | None = None,
+        status: str | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            info = await self.bot.update_presence(text=text, type=type, status=status)  # type: ignore[attr-defined]
+            msg = (
+                f"Bot presence updated:\n"
+                f"• **Text**: `{info['text']}`\n"
+                f"• **Type**: `{info['type']}`\n"
+                f"• **Status**: `{info['status']}`"
+            )
+            if not info.get("is_custom"):
+                msg += "\n*(reverted to default config)*"
+            await interaction.followup.send(msg, ephemeral=True)
+        except Exception as exc:
+            log.exception("failed to update presence")
+            await interaction.followup.send(f"Failed to update presence: `{exc}`", ephemeral=True)
+
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(StatusCog(bot))

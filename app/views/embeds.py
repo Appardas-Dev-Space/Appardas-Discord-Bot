@@ -27,6 +27,9 @@ def announcement_embed(
     author_icon_url: str | None = None,
     scheduled_for: datetime | None = None,
     image_url: str | None = None,
+    footer_text: str | None = None,
+    fields: list[dict[str, Any]] | None = None,
+    color: int | None = None,
 ) -> discord.Embed:
     clean_title = (title or "").strip()
     if not clean_title or clean_title.upper() in ("ANNOUNCEMENT", "SERVER ANNOUNCEMENT"):
@@ -36,18 +39,41 @@ def announcement_embed(
     else:
         header = clean_title
 
+    embed_color = BRAND_COLOR
+    if color is not None:
+        if isinstance(color, int):
+            embed_color = color
+        elif isinstance(color, str):
+            clean = color.strip().lstrip("#")
+            try:
+                embed_color = int(clean, 16)
+            except ValueError:
+                embed_color = BRAND_COLOR
+
     embed = discord.Embed(
         title=truncate(header, 256),
         description=truncate(body, 4000),
-        color=BRAND_COLOR,
+        color=embed_color,
         timestamp=scheduled_for,
     )
-    embed.set_author(name="Admin Announcement", icon_url=author_icon_url)
+    author_display = author_name or "Admin Announcement"
+    embed.set_author(name=truncate(author_display, 256), icon_url=author_icon_url)
     if author_icon_url:
         embed.set_thumbnail(url=author_icon_url)
-    embed.set_footer(text="Message your `admin` to learn more")
+    footer = footer_text if footer_text is not None and footer_text.strip() else "Message your `admin` to learn more"
+    embed.set_footer(text=truncate(footer, 2048))
     if image_url:
         embed.set_image(url=image_url)
+    if fields:
+        for f in fields:
+            name = str(f.get("name") or "").strip()
+            val = str(f.get("value") or "").strip()
+            if name and val:
+                embed.add_field(
+                    name=truncate(name, 256),
+                    value=truncate(val, 1024),
+                    inline=bool(f.get("inline", False)),
+                )
     return embed
 
 

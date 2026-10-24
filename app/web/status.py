@@ -215,7 +215,7 @@ async def shutdown_streams(app: web.Application) -> None:
 
 
 def create_app(bot: Any) -> web.Application:
-    from . import accounts, activity, auth, dashboard, public
+    from . import accounts, activity, auth, dashboard, presence, public
     app = web.Application(client_max_size=32768, middlewares=[context_middleware, gzip_middleware, error_middleware, request_guard_middleware, rate_limit_middleware, authentication_middleware])
     app["bot"] = bot
     app["rate_bucket"] = TokenBucket(bot.cfg.rate_limit_per_min, bot.cfg.rate_limit_burst)
@@ -233,7 +233,7 @@ def create_app(bot: Any) -> web.Application:
     app.router.add_get("/status", status)
     app.router.add_get("/assets/{name}", asset)
     app.router.add_get("/favicon.svg", favicon)
-    for module in (public, auth, dashboard, accounts, activity):
+    for module in (public, auth, dashboard, accounts, activity, presence):
         module.setup_routes(app)
     app.router.add_route("*", "/{tail:.*}", not_found)
     return app

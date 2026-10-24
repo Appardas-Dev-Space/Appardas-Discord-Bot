@@ -103,6 +103,22 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS idx_audit ON audit_log (guild_id, created_at DESC);
 
+-- Command usage log (time slot, user, command name, options, outcome).
+CREATE TABLE IF NOT EXISTS command_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id    INTEGER,
+  channel_id  INTEGER,
+  user_id     INTEGER NOT NULL,
+  user_name   TEXT NOT NULL,
+  command     TEXT NOT NULL,
+  options     TEXT,
+  status      TEXT NOT NULL DEFAULT 'success',  -- success | error | denied
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_command_log_guild ON command_log (guild_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_command_log_user ON command_log (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_command_log_created ON command_log (created_at DESC);
+
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT

@@ -97,6 +97,69 @@ class StatusService:
     def set_rest_latency(self, ms: float) -> None:
         self.rest_latency_ms = round(ms, 1)
 
+    # ------------------------------------------------------------- presence
+    async def get_presence(self, *, conn: Any = None) -> dict[str, Any]:
+        text = await self.db.get_meta("presence_text", conn=conn)
+        typ = await self.db.get_meta("presence_type", conn=conn)
+        stat = await self.db.get_meta("presence_status", conn=conn)
+        return {
+            "text": text if text is not None else self.config.activity_text,
+            "type": typ if typ is not None else self.config.activity_type,
+            "status": stat if stat is not None else "online",
+            "is_custom": text is not None,
+        }
+
+    async def set_presence(
+        self,
+        text: str | None = None,
+        type: str | None = None,
+        status: str | None = None,
+        *,
+        conn: Any = None,
+    ) -> dict[str, Any]:
+        if text is not None and text.strip().lower() in ("reset", "default", "none"):
+            await self.db.delete_meta("presence_text", conn=conn)
+            await self.db.delete_meta("presence_type", conn=conn)
+            await self.db.delete_meta("presence_status", conn=conn)
+        else:
+            if text is not None:
+                cleaned_text = text.strip()
+                if cleaned_text:
+                    await self.db.set_meta("presence_text", cleaned_text, conn=conn)
+                else:
+                    await self.db.delete_meta("presence_text", conn=conn)
+            if type is not None:
+                await self.db.set_meta("presence_type", type.strip().lower(), conn=conn)
+            if status is not None:
+                await self.db.set_meta("presence_status", status.strip().lower(), conn=conn)
+        self._snapshot = None
+        return await self.get_presence(conn=conn)
+
+    def build_activity(self, text: str, type_str: str) -> Any:
+        import discord
+        type_norm = (type_str or "watching").strip().lower()
+        if type_norm == "custom":
+            return discord.CustomActivity(name=text)
+        activity_type = {
+            "playing": discord.ActivityType.playing,
+            "watching": discord.ActivityType.watching,
+            "listening": discord.ActivityType.listening,
+            "competing": discord.ActivityType.competing,
+        }.get(type_norm, discord.ActivityType.watching)
+        return discord.Activity(type=activity_type, name=text)
+
+    def resolve_status(self, status_str: str) -> Any:
+        import discord
+        status_norm = (status_str or "online").strip().lower()
+        return {
+            "online": discord.Status.online,
+            "idle": discord.Status.idle,
+            "dnd": discord.Status.dnd,
+            "do_not_disturb": discord.Status.dnd,
+            "offline": discord.Status.invisible,
+            "invisible": discord.Status.invisible,
+        }.get(status_norm, discord.Status.online)
+
     # -------------------------------------------------------------- monitors
     async def start_monitors(self) -> None:
         self._tasks.append(asyncio.create_task(self._loop_lag_loop(), name="loop-lag"))
@@ -245,6 +308,7 @@ class StatusService:
                     "rest_latency_ms": self.rest_latency_ms,
                     "guilds": self._guilds(),
                     "members_cached": self._members_cached(),
+                    "presence": await self.get_presence(),
                 },
                 "db": {
                     "healthy": db_ok,
@@ -414,9 +478,14 @@ class StatusService:
 
     # ----------------------------------------------------------------- prune
     async def prune(self) -> dict[str, int]:
-        counts = {"audit": 0, "activity": 0, "sessions": 0, "nudges": 0, "announcements": 0, "heartbeats": 0}
+        counts = {"audit": 0, "commands": 0, "activity": 0, "sessions": 0, "nudges": 0, "announcements": 0, "heartbeats": 0}
         try:
             counts["audit"] = await self.settings.audit.prune(self.config.audit_retention_days)
+            cursor = await self.db.execute(
+                "DELETE FROM command_log WHERE created_at < ?",
+                (iso(utcnow() - timedelta(days=self.config.audit_retention_days)),),
+            )
+            counts["commands"] = int(cursor.rowcount or 0)
             from .activity import ActivityService
             from ..web.sessions import Sessions
             counts["activity"] = await ActivityService(self.db).prune(self.config.activity_retention_days)
