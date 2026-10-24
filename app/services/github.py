@@ -87,6 +87,47 @@ def _event_id(event: dict[str, Any]) -> int:
         return 0
 
 
+def _event_key(event: dict[str, Any]) -> tuple[str, int]:
+    return (str(event.get("created_at") or ""), _event_id(event))
+
+
+def _serialize_cursor(event: dict[str, Any]) -> str:
+    ev_time = str(event.get("created_at") or "")
+    ev_id = _event_id(event)
+    return f"{ev_time}|{ev_id}"
+
+
+def _cursor_key(cursor_val: Any, watch: dict[str, Any] | None = None) -> tuple[str, int]:
+    if not cursor_val:
+        return ("", 0)
+    raw = str(cursor_val).strip()
+    if "|" in raw:
+        time_part, id_part = raw.split("|", 1)
+        try:
+            return (time_part, int(id_part))
+        except ValueError:
+            return (time_part, 0)
+    if "T" in raw and ("Z" in raw or "+" in raw or "-" in raw):
+        return (raw, 0)
+    if raw.isdigit():
+        legacy_id = int(raw)
+        fallback_time = (watch or {}).get("last_delivered") or (watch or {}).get("last_polled") or ""
+        return (fallback_time, legacy_id)
+    return ("", 0)
+
+
+def _is_newer(event: dict[str, Any], cursor_time: str, cursor_id: int) -> bool:
+    ev_time = str(event.get("created_at") or "")
+    ev_id = _event_id(event)
+    if cursor_time:
+        if ev_time > cursor_time:
+            return True
+        if ev_time == cursor_time:
+            return ev_id > cursor_id
+        return False
+    return ev_id > cursor_id
+
+
 class GitHubService:
     def __init__(
         self,
@@ -173,10 +214,10 @@ class GitHubService:
         # Backfill policy: seed the cursor now, deliver nothing from the past.
         status, items, etag = await self._fetch(watch)
         if status == 200 and items:
-            newest = max(_event_id(item) for item in items)
+            newest_item = max(items, key=_event_key)
             await self.db.execute(
                 "UPDATE github_watches SET cursor = ?, etag = ?, last_polled = ? WHERE id = ?",
-                (str(newest), etag, iso(), watch["id"]),
+                (_serialize_cursor(newest_item), etag, iso(), watch["id"]),
             )
             watch = await self.get_watch(guild_id, target)
         await self.audit.record(
@@ -418,18 +459,19 @@ class GitHubService:
                 result["failed"] += 1
                 continue
 
-            cursor = int(watch["cursor"] or 0)
-            if cursor == 0:
-                newest = max((_event_id(item) for item in items), default=0)
+            cursor_raw = watch.get("cursor")
+            cursor_time, cursor_id = _cursor_key(cursor_raw, watch)
+            if not cursor_time and cursor_id == 0:
+                newest_cursor = _serialize_cursor(max(items, key=_event_key)) if items else f"{now}|0"
                 await self.db.execute(
                     "UPDATE github_watches SET cursor = ?, etag = ?, last_polled = ?, state = 'quiet' "
                     "WHERE id = ?",
-                    (str(newest), etag, now, watch["id"]),
+                    (newest_cursor, etag, now, watch["id"]),
                 )
                 result["quiet"] += 1
                 continue
 
-            fresh = [item for item in items if _event_id(item) > cursor]
+            fresh = [item for item in items if _is_newer(item, cursor_time, cursor_id)]
             embed, total = self.build_summary(watch, fresh)
             if embed is None or total == 0:
                 await self._after_poll(watch, etag, "quiet", now, delivered=False)
@@ -467,11 +509,12 @@ class GitHubService:
                 result["failed"] += 1
                 continue
 
-            newest = max(_event_id(item) for item in fresh)
+            newest_item = max(fresh, key=_event_key)
+            newest_cursor = _serialize_cursor(newest_item)
             await self.db.execute(
                 "UPDATE github_watches SET cursor = ?, etag = ?, last_polled = ?, "
                 "last_delivered = ?, state = 'ok', last_error = NULL WHERE id = ?",
-                (str(newest), etag, now, now, watch["id"]),
+                (newest_cursor, etag, now, now, watch["id"]),
             )
             await self.audit.record(
                 guild_id=guild_id,

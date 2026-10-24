@@ -93,3 +93,32 @@ async def test_command_log_set_status_and_prune(db):
 
     remaining = await service.tail(guild_id=20)
     assert len(remaining) == 0
+
+
+async def test_bot_on_interaction_regression(cfg):
+    import discord
+    from types import SimpleNamespace
+    from app.main import AppBot
+
+    bot = AppBot(cfg)
+    await bot.prepare()
+    try:
+        interaction = SimpleNamespace(
+            type=discord.InteractionType.application_command,
+            data={"name": "status", "options": []},
+            guild_id=1,
+            channel_id=10,
+            user=SimpleNamespace(id=99, name="tester", discriminator="0"),
+            extras={},
+        )
+        # Verify it executes cleanly without AttributeError: 'super' object has no attribute 'on_interaction'
+        await bot.on_interaction(interaction)
+        assert "command_log_id" in interaction.extras
+        log_id = interaction.extras["command_log_id"]
+        row = await bot.db.fetchone("SELECT * FROM command_log WHERE id = ?", (log_id,))
+        assert row is not None
+        assert row["command"] == "status"
+        assert row["user_name"] == "tester"
+    finally:
+        await bot.close()
+        await bot.shutdown()
