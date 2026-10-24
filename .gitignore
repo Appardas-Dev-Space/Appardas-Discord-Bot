@@ -1,0 +1,58 @@
+# --- secrets ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# --- node / web ------------------------------------------------------------
+node_modules/
+.astro/
+dist/
+.next/
+npm-debug.log*
+pnpm-debug.log*
+
+# --- os / editor -----------------------------------------------------------
+.DS_Store
+._*
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- local data & runtime --------------------------------------------------
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+dumps/
+backups/
+logs/
+*.log
+
+# --- local archives & tooling caches ---------------------------------------
+archive/
+.engram
+.engram/
+.graphify/
+.taste-skill/
+scratch/
+tmp/

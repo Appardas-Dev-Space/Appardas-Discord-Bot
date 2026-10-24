@@ -1,0 +1,41 @@
+name: backup
+
+on:
+  schedule:
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull a consistent SQLite snapshot over SSH
+        env:
+          HOST: ${{ secrets.BACKUP_HOST }}
+          PORT: ${{ secrets.BACKUP_PORT }}
+          USER: ${{ secrets.BACKUP_USER }}
+          KEY: ${{ secrets.BACKUP_SSH_KEY }}
+          DB_PATH: ${{ secrets.BACKUP_DB_PATH }}
+        run: |
+          if [ -z "$HOST" ] || [ -z "$KEY" ]; then
+            echo "Backup secrets are not configured; skipping." >&2
+            exit 0
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${PORT:-22}" "$HOST" >> ~/.ssh/known_hosts
+          # `.backup` is SQLite's consistent-copy command; never copy a WAL file hot.
+          ssh -i ~/.ssh/id_ed25519 -p "${PORT:-22}" "$USER@$HOST" \
+            "sqlite3 '${DB_PATH:-data/appardas.db}' '.backup /tmp/appardas-backup.db' && gzip -c /tmp/appardas-backup.db" \
+            > appardas-backup.db.gz
+          gzip -t appardas-backup.db.gz
+          ls -lh appardas-backup.db.gz
+
+      - name: Upload the snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: appardas-sqlite-${{ github.run_id }}
+          path: appardas-backup.db.gz
+          retention-days: 30
+          if-no-files-found: warn

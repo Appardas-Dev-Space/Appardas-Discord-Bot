@@ -1,0 +1,49 @@
+name: uptime
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe /health
+        id: probe
+        env:
+          URL: ${{ secrets.BOT_HEALTH_URL }}
+        run: |
+          if [ -z "$URL" ]; then
+            echo "BOT_HEALTH_URL is not configured; skipping." >&2
+            echo "ok=skip" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for attempt in 1 2 3; do
+            if curl -fsS --max-time 10 "$URL" > /tmp/health.json; then
+              cat /tmp/health.json
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+
+      - name: Open or close the alarm issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          existing=$(gh issue list --repo "$REPO" --label uptime --state open --json number --jq '.[0].number')
+          if [ "${{ steps.probe.outputs.ok }}" = "false" ]; then
+            if [ -z "$existing" ]; then
+              gh issue create --repo "$REPO" --label uptime \
+                --title "Uptime: /health is failing" \
+                --body "Three consecutive probes failed. Check the deployment, the port binding and the panel console. The bot's port is plain HTTP; \`HTTP_HOST\` must be \`0.0.0.0\`."
+            fi
+          elif [ "${{ steps.probe.outputs.ok }}" = "true" ] && [ -n "$existing" ]; then
+            gh issue close --repo "$REPO" "$existing" --comment "Recovered: /health answers again."
+          fi
