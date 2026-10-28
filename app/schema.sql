@@ -1,4 +1,4 @@
--- appardas schema v3. Migration and env-owner seeding share a startup transaction.
+-- appardas schema v4. Migration and env-owner seeding share a startup transaction.
 
 CREATE TABLE IF NOT EXISTS guilds (
   id          INTEGER PRIMARY KEY,
@@ -133,7 +133,7 @@ CREATE INDEX IF NOT EXISTS idx_heartbeats ON heartbeats (bucket_at DESC);
 
 CREATE TABLE IF NOT EXISTS accounts (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  discord_user_id INTEGER UNIQUE,
+  discord_user_id TEXT UNIQUE,
   username        TEXT UNIQUE,
   password_hash   TEXT,
   must_change_password INTEGER NOT NULL DEFAULT 0,
@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts (status);
 CREATE INDEX IF NOT EXISTS idx_accounts_discord ON accounts (discord_user_id);
 CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts (username);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_username_ci ON accounts (lower(username)) WHERE username IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS account_guilds (
   account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -206,5 +207,5 @@ CREATE INDEX IF NOT EXISTS idx_activity_account ON activity_log (account_id, cre
 CREATE INDEX IF NOT EXISTS idx_activity_guild ON activity_log (guild_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_activity_action ON activity_log (action, created_at DESC);
 
-INSERT INTO meta (key, value) VALUES ('schema_version', '3')
+INSERT INTO meta (key, value) VALUES ('schema_version', '4')
   ON CONFLICT(key) DO UPDATE SET value = excluded.value;

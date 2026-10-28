@@ -66,7 +66,7 @@ async def test_migration_and_failed_owner_seed_roll_back_together(tmp_path):
         assert conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone() == ("2",)
         assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'accounts'").fetchone() is None
     await database.connect(owner_ids=(1,))
-    assert await database.get_meta("schema_version") == "3"
+    assert await database.get_meta("schema_version") == "4"
     assert await database.get_meta("dash.jti.old") is None
     assert await database.scalar("SELECT COUNT(*) FROM sessions") == 0
     await database.close()

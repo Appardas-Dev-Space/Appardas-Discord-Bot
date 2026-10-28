@@ -3,18 +3,72 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 from typing import Any
 
+import discord
 from aiohttp import web
 
-from ..services.accounts import AccountError, validate_discord_id
+from ..services.accounts import Account, AccountError, validate_discord_id
 from ..services.activity import record_activity
 from .common import WebError, accessible_guilds, form_data, html, mutation, positive_id, wants_json
 from .templates.app.admin_accounts import accounts_page, detail_page, new_account_page
 from .templates.base import layout
 
 log = logging.getLogger(__name__)
+
+CREDENTIAL_DM_TIMEOUT_S = 5.0
+CREATED_DM_MESSAGE = "Account created. The bot sent the credentials by DM to the new account's Discord user."
+CREATED_DM_WARNING = "Account created, but credentials DM delivery could not be confirmed. Ask the new user to allow DMs or share the credentials confidentially. Do not create another account."
+
+
+async def _send_credentials_dm(request: web.Request, account: Account, temporary_password: str) -> bool:
+    """Send only after commit, to the new account's Discord identity, never the actor."""
+    bot = request.app["bot"]
+    recipient_id = account.discord_user_id
+    if recipient_id is None or not account.username:
+        return False
+    loop = asyncio.get_running_loop()
+    deadline = request.get("request_deadline", loop.time() + CREDENTIAL_DM_TIMEOUT_S + .1)
+    timeout = min(CREDENTIAL_DM_TIMEOUT_S, deadline - loop.time() - .1)
+    if timeout <= 0:
+        log.warning("credentials DM unconfirmed request=%s account=%s recipient=%s reason=deadline", request["request_id"], account.id, recipient_id)
+        return False
+
+    async def send():
+        recipient = bot.get_user(recipient_id) or await bot.fetch_user(recipient_id)
+        prefix = (
+            "Your Appardas console account has been created.\n"
+            f"Sign in: {bot.cfg.public_base_url}/login\n"
+            f"Username: `{account.username}`\n"
+        )
+        reminder = "You must change the temporary password on first sign-in before accessing the console. Keep these credentials private and delete this message after changing your password."
+        content = prefix + f"Temporary password:\n```\n{temporary_password}\n```\n" + reminder
+        # Preserve arbitrary valid passwords without breaking Discord Markdown or its size limit.
+        attachment = (
+            "```" in temporary_password or not temporary_password.isprintable()
+            or temporary_password != temporary_password.strip()
+            or len(content.encode("utf-16-le")) // 2 > 2000
+        )
+        if attachment:
+            content = prefix + "Temporary password: copy the entire contents of the attached text file.\n" + reminder
+            with io.BytesIO(temporary_password.encode("utf-8")) as stream:
+                file = discord.File(stream, filename="temporary-password.txt")
+                try:
+                    await recipient.send(content, file=file, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+                finally:
+                    file.close()
+        else:
+            await recipient.send(content, allowed_mentions=discord.AllowedMentions.none(), suppress_embeds=True)
+
+    try:
+        await asyncio.wait_for(send(), timeout=timeout)
+    except Exception as exc:
+        # Discord error bodies can contain submitted message content; never log them.
+        log.warning("credentials DM unconfirmed request=%s account=%s recipient=%s reason=%s", request["request_id"], account.id, recipient_id, type(exc).__name__)
+        return False
+    return True
 
 
 async def guild_rows(request: web.Request) -> list[dict[str, Any]]:
@@ -57,11 +111,11 @@ async def list_accounts(request: web.Request) -> web.Response:
 
 async def new_account(request: web.Request) -> web.Response:
     bot = request.app["bot"]
-    values = {key: request.query.get(key, "")[:200] for key in ("discord_user_id", "name", "role", "note")}
+    values = {key: request.query.get(key, "")[:200] for key in ("discord_user_id", "username", "name", "role", "note")}
     lookup, lookup_error = None, ""
     if values["discord_user_id"]:
         try:
-            discord_id = validate_discord_id(values["discord_user_id"])
+            discord_id = int(validate_discord_id(values["discord_user_id"]))
         except AccountError as exc:
             lookup_error = str(exc)
         else:
@@ -93,7 +147,7 @@ async def new_account(request: web.Request) -> web.Response:
 async def create_account(request: web.Request) -> web.Response:
     bot = request.app["bot"]
     form = await form_data(request)
-    values = {key: str(form.get(key, ""))[:280] for key in ("discord_user_id", "name", "role", "note")}
+    values = {key: str(form.get(key, ""))[:280] for key in ("discord_user_id", "username", "name", "role", "note")}
 
     async def operation(conn):
         guild_ids = []
@@ -105,6 +159,8 @@ async def create_account(request: web.Request) -> web.Response:
         account = await bot.accounts.create(
             actor=request["account"],
             discord_user_id=form.get("discord_user_id", ""),
+            username=form.get("username", ""),
+            temporary_password=form.get("temporary_password", ""),
             name=form.get("name", ""),
             role=form.get("role", ""),
             guild_ids=guild_ids,
@@ -115,8 +171,7 @@ async def create_account(request: web.Request) -> web.Response:
             request=request,
             action="account.create",
             target=str(account.id),
-            after={"discord_user_id": account.discord_user_id, "name": account.name, "role": account.role, "guilds": sorted(guild_ids)},
-            detail={"verified": bool(values.get("discord_user_id"))},
+            after={"discord_user_id": str(account.discord_user_id), "username": account.username, "name": account.name, "role": account.role, "guilds": sorted(guild_ids)},
             conn=conn,
         )
         return account
@@ -135,9 +190,12 @@ async def create_account(request: web.Request) -> web.Response:
             return web.json_response({"error": exc.error, "message": exc.message}, status=exc.status)
         content = new_account_page(guilds=await guild_rows(request), csrf=request["session"].csrf, values=values, errors={"account": exc.message})
         return await shell(request, "New account", content, active="accounts", status=exc.status)
+    dm_delivered = await _send_credentials_dm(request, account, form.get("temporary_password", ""))
+    location = f'/dashboard/admin/accounts/{account.id}?saved=created&dm={"sent" if dm_delivered else "failed"}'
+    message = CREATED_DM_MESSAGE if dm_delivered else CREATED_DM_WARNING
     if wants_json(request):
-        return web.json_response({"redirect": f"/dashboard/admin/accounts/{account.id}", "message": "Account created."})
-    return web.HTTPSeeOther(f"/dashboard/admin/accounts/{account.id}?saved=created")
+        return web.json_response({"redirect": location, "message": message, "dm_delivered": dm_delivered})
+    return web.HTTPSeeOther(location)
 
 
 async def detail(request: web.Request) -> web.Response:
@@ -145,7 +203,18 @@ async def detail(request: web.Request) -> web.Response:
     row, sessions = await account_rows(request)
     granted = {guild["id"] for guild in await bot.accounts.guilds(row["id"])}
     activity_rows = await bot.activity_service.query({"account": str(row["id"]), "limit": "20"}, limit=20)
-    message = "Account created. Share the sign-in link with them." if request.query.get("saved") else ""
+    message = {
+        "created": "Account created. Share the sign-in link, username and temporary password confidentially.",
+        "credentials": "Credentials saved. Share the username and temporary password confidentially. Previous sessions were signed out.",
+        "updated": "Account saved.",
+        "status": "Account status saved.",
+        "grants": "Server grants saved.",
+    }.get(request.query.get("saved", ""), "")
+    if request.query.get("saved") == "created":
+        if request.query.get("dm") == "sent":
+            message = CREATED_DM_MESSAGE
+        elif request.query.get("dm") == "failed":
+            message = CREATED_DM_WARNING
     content = detail_page(
         account=row,
         bot=bot,
@@ -200,6 +269,43 @@ async def update_account(request: web.Request) -> web.Response:
     if wants_json(request):
         return web.json_response({"redirect": f"/dashboard/admin/accounts/{result.id}?saved=updated", "message": "Account saved."})
     return web.HTTPSeeOther(f"/dashboard/admin/accounts/{result.id}?saved=updated")
+
+
+async def set_credentials(request: web.Request) -> web.Response:
+    bot = request.app["bot"]
+    account_id = positive_id(request.match_info["account_id"])
+
+    async def operation(conn):
+        form = await form_data(request)
+        target = await bot.accounts.get(account_id, conn=conn)
+        if target is None:
+            raise WebError(404, "not_found", "That account was not found.")
+        result, deleted = await bot.accounts.set_credentials(
+            target.id,
+            actor=request["account"],
+            username=form.get("username", ""),
+            temporary_password=form.get("temporary_password", ""),
+            conn=conn,
+        )
+        await record_activity(
+            request=request,
+            action="account.credentials.reset",
+            target=str(result.id),
+            before={"username": target.username},
+            after={"username": result.username},
+            detail={"sessions_deleted": deleted},
+            conn=conn,
+        )
+        return result
+
+    try:
+        result = await mutation(request, operation)
+    except AccountError as exc:
+        return await _detail_error(request, exc.field, str(exc))
+    location = f"/dashboard/admin/accounts/{result.id}?saved=credentials"
+    if wants_json(request):
+        return web.json_response({"redirect": location, "message": "Credentials saved. Previous sessions were signed out."})
+    return web.HTTPSeeOther(location)
 
 
 async def _detail_error(request: web.Request, field: str, message: str) -> web.Response:
@@ -305,5 +411,6 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_post("/dashboard/admin/accounts", create_account)
     app.router.add_get("/dashboard/admin/accounts/{account_id}", detail)
     app.router.add_post("/dashboard/admin/accounts/{account_id}", update_account)
+    app.router.add_post("/dashboard/admin/accounts/{account_id}/credentials", set_credentials)
     app.router.add_post("/dashboard/admin/accounts/{account_id}/status", set_status)
     app.router.add_post("/dashboard/admin/accounts/{account_id}/guilds", set_grants)

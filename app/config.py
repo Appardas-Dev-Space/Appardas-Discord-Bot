@@ -40,7 +40,7 @@ class Settings:
     http_host: str
     http_port: int
     public_base_url: str
-    discord_client_id: str
+    discord_client_id: str  # Legacy configuration only; console sign-in is local.
     discord_client_secret: str
     session_idle_days: int
     session_max_days: int
@@ -268,13 +268,6 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     public_base_url = _public_url(public_base_url, errors, production=production, secure=cookie_secure)
     discord_client_id = _raw(env, "DISCORD_CLIENT_ID")
     discord_client_secret = _raw(env, "DISCORD_CLIENT_SECRET")
-    if discord_client_id and (not discord_client_id.isascii() or not discord_client_id.isdigit()):
-        errors.append("DISCORD_CLIENT_ID: expected the numeric application ID")
-    if production:
-        if not discord_client_id:
-            errors.append("DISCORD_CLIENT_ID: required in production")
-        if not discord_client_secret:
-            errors.append("DISCORD_CLIENT_SECRET: required in production")
     session_idle_days = _as_int(_raw(env, "SESSION_IDLE_DAYS"), "SESSION_IDLE_DAYS", errors, 30, minimum=1, maximum=365)
     session_max_days = _as_int(_raw(env, "SESSION_MAX_DAYS"), "SESSION_MAX_DAYS", errors, 90, minimum=1, maximum=3650)
     if session_idle_days > session_max_days:

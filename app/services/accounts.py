@@ -1,4 +1,4 @@
-"""Closed-registration accounts: Discord proves identity or operator credentials grant access."""
+"""Closed-registration local credentials with an associated Discord identity."""
 
 from __future__ import annotations
 
@@ -66,6 +66,9 @@ class Account:
         data = {field.name: row[field.name] for field in fields(cls) if field.name in row}
         data["is_system"] = bool(data.get("is_system", 0))
         data["must_change_password"] = bool(data.get("must_change_password", 0))
+        if data.get("discord_user_id") is not None:
+            # Persist snowflakes as text; Discord SDK integrations use exact Python integers.
+            data["discord_user_id"] = int(data["discord_user_id"])
         for field in fields(cls):
             if field.name not in data:
                 data[field.name] = field.default if field.default is not None else None
@@ -76,11 +79,23 @@ class Account:
         return self.status == "active" and self.role in ("admin", "owner")
 
 
-def validate_discord_id(value: object) -> int:
+def validate_discord_id(value: object) -> str:
     text = str(value)
     if not re.fullmatch(r"[1-9][0-9]{16,19}", text) or int(text) > 2**63 - 1:
         raise AccountError("That does not look like a Discord user ID. It is a 17–20 digit number.", "discord_user_id")
-    return int(text)
+    return text
+
+
+def validate_username(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value.strip()):
+        raise AccountError("Username must be 1–64 letters, digits, dots, underscores or hyphens.", "username")
+    return value.strip().lower()
+
+
+def validate_temporary_password(value: object) -> str:
+    if not isinstance(value, str) or len(value) < 6 or not value.strip():
+        raise AccountError("Temporary password must be at least 6 characters and not blank.", "temporary_password")
+    return value
 
 
 def validate_identity(name: str, note: str | None) -> tuple[str, str | None]:
@@ -102,7 +117,7 @@ def bootstrap_owners(conn: sqlite3.Connection, owner_ids: Iterable[int]) -> None
         "SELECT id, discord_user_id FROM accounts WHERE (role = 'owner' OR is_system = 1) AND discord_user_id IS NOT NULL"
     ).fetchall()
     for row in removed:
-        if row["discord_user_id"] not in owners:
+        if int(row["discord_user_id"]) not in owners:
             conn.execute("UPDATE accounts SET role = 'viewer', is_system = 0, updated_at = ? WHERE id = ?", (now, row["id"]))
             conn.execute("DELETE FROM sessions WHERE account_id = ?", (row["id"],))
     for discord_id in sorted(owners):
@@ -110,14 +125,14 @@ def bootstrap_owners(conn: sqlite3.Connection, owner_ids: Iterable[int]) -> None
             "INSERT INTO accounts (discord_user_id, name, role, status, is_system, created_at, updated_at) "
             "VALUES (?, ?, 'owner', 'active', 1, ?, ?) ON CONFLICT(discord_user_id) DO UPDATE SET "
             "role = 'owner', status = 'active', is_system = 1, created_by = NULL, updated_at = excluded.updated_at",
-            (discord_id, f"Owner {discord_id}", now, now),
+            (str(discord_id), f"Owner {discord_id}", now, now),
         )
 
 
 def bootstrap_preliminary_admin(conn: sqlite3.Connection) -> None:
     """Seed preliminary admin account (appardas-admin / admin) with mandatory password reset."""
     now = iso()
-    existing = conn.execute("SELECT id, username FROM accounts WHERE username = 'appardas-admin'").fetchone()
+    existing = conn.execute("SELECT id, username FROM accounts WHERE lower(username) = 'appardas-admin'").fetchone()
     if not existing:
         pwd_hash = hash_password("admin")
         cursor = conn.execute(
@@ -143,14 +158,17 @@ class AccountsService:
         row = await self.db.fetchone_on(conn, sql, (account_id,)) if conn is not None else await self.db.fetchone(sql, (account_id,))
         return Account.from_row(row) if row else None
 
-    async def by_discord_id(self, discord_id: int, *, conn: sqlite3.Connection | None = None) -> Account | None:
+    async def by_discord_id(self, discord_id: int | str, *, conn: sqlite3.Connection | None = None) -> Account | None:
         sql = "SELECT * FROM accounts WHERE discord_user_id = ?"
-        row = await self.db.fetchone_on(conn, sql, (discord_id,)) if conn is not None else await self.db.fetchone(sql, (discord_id,))
+        params = (str(discord_id),)
+        row = await self.db.fetchone_on(conn, sql, params) if conn is not None else await self.db.fetchone(sql, params)
         return Account.from_row(row) if row else None
 
     async def by_username(self, username: str, *, conn: sqlite3.Connection | None = None) -> Account | None:
+        # Keep legacy usernames usable; new credentials have stricter creation validation.
         sql = "SELECT * FROM accounts WHERE lower(username) = lower(?)"
-        row = await self.db.fetchone_on(conn, sql, (username.strip(),)) if conn is not None else await self.db.fetchone(sql, (username.strip(),))
+        params = (username.strip(),)
+        row = await self.db.fetchone_on(conn, sql, params) if conn is not None else await self.db.fetchone(sql, params)
         return Account.from_row(row) if row else None
 
     async def authenticate(self, username: str, password: str, *, ip: str | None = None, conn: sqlite3.Connection | None = None) -> Account | None:
@@ -202,8 +220,8 @@ class AccountsService:
     async def list(self, *, q: str = "", role: str = "", status: str = "") -> list[dict[str, Any]]:
         clauses, params = [], []
         if q:
-            clauses.append("(instr(lower(a.name), lower(?)) > 0 OR instr(CAST(a.discord_user_id AS TEXT), ?) > 0)")
-            params.extend((q[:200], q[:200]))
+            clauses.append("(instr(lower(a.name), lower(?)) > 0 OR instr(lower(a.username), lower(?)) > 0 OR instr(a.discord_user_id, ?) > 0)")
+            params.extend((q[:200], q[:200], q[:200]))
         if role in ("owner", "admin", "viewer"):
             clauses.append("a.role = ?")
             params.append(role)
@@ -238,12 +256,12 @@ class AccountsService:
         return row is not None
 
     async def create(
-        self, *, actor: Account, discord_user_id: object, name: str, role: str,
+        self, *, actor: Account, discord_user_id: object, username: str, temporary_password: str, name: str, role: str,
         guild_ids: Iterable[int] = (), note: str | None = None, conn: sqlite3.Connection | None = None,
     ) -> Account:
         if conn is None:
             async with self.db.transaction() as transaction:
-                return await self.create(actor=actor, discord_user_id=discord_user_id, name=name, role=role, guild_ids=guild_ids, note=note, conn=transaction)
+                return await self.create(actor=actor, discord_user_id=discord_user_id, username=username, temporary_password=temporary_password, name=name, role=role, guild_ids=guild_ids, note=note, conn=transaction)
         await self._owner(actor, conn)
         discord_id = validate_discord_id(discord_user_id)
         name, note = validate_identity(name, note)
@@ -251,16 +269,20 @@ class AccountsService:
             raise AccountError("Choose admin or viewer. Owners are managed by BOT_OWNER_IDS.", "role")
         duplicate = await self.by_discord_id(discord_id, conn=conn)
         if duplicate:
-            raise AccountError("That Discord ID already has an account. Open it to change the role or reactivate it.", "discord_user_id", duplicate.id)
+            raise AccountError("That Discord ID already has an account. Open it to assign credentials, change the role or reactivate it.", "discord_user_id", duplicate.id)
         grants = set(guild_ids)
         await self._validate_grants(grants, conn)
+        username, password_hash = await self._credential_values(username, temporary_password, conn)
         now = iso()
         try:
             cursor = await self.db.execute_on(conn,
-                "INSERT INTO accounts (discord_user_id, name, role, note, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (discord_id, name, role, note, actor.id, now, now),
+                "INSERT INTO accounts (discord_user_id, username, password_hash, must_change_password, name, role, note, created_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)",
+                (discord_id, username, password_hash, name, role, note, actor.id, now, now),
             )
         except sqlite3.IntegrityError as exc:
+            if await self.by_username(username, conn=conn) is not None:
+                raise AccountError("That username already has an account. Choose a different username.", "username") from exc
             raise AccountError("That Discord ID already has an account.", "discord_user_id") from exc
         account_id = int(cursor.lastrowid)
         for guild_id in sorted(grants):
@@ -268,6 +290,43 @@ class AccountsService:
         account = await self.get(account_id, conn=conn)
         assert account is not None
         return account
+
+    async def _credential_values(
+        self, username: str, temporary_password: str, conn: sqlite3.Connection, *, account_id: int | None = None,
+    ) -> tuple[str, str]:
+        username = validate_username(username)
+        temporary_password = validate_temporary_password(temporary_password)
+        duplicate = await self.by_username(username, conn=conn)
+        if duplicate is not None and duplicate.id != account_id:
+            raise AccountError("That username already has an account. Choose a different username.", "username")
+        return username, hash_password(temporary_password)
+
+    async def set_credentials(
+        self, account_id: int, *, actor: Account, username: str, temporary_password: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[Account, int]:
+        if conn is None:
+            async with self.db.transaction() as transaction:
+                return await self.set_credentials(account_id, actor=actor, username=username, temporary_password=temporary_password, conn=transaction)
+        await self._owner(actor, conn)
+        target = await self.get(account_id, conn=conn)
+        if target is None:
+            raise AccountError("Account not found")
+        if target.is_system and target.username and validate_username(username) != target.username.lower():
+            # Renaming the preliminary admin would cause startup to seed it again.
+            raise AccountError("An existing system username cannot be changed here.", "username")
+        username, password_hash = await self._credential_values(username, temporary_password, conn, account_id=account_id)
+        try:
+            await self.db.execute_on(conn,
+                "UPDATE accounts SET username = ?, password_hash = ?, must_change_password = 1, updated_at = ? WHERE id = ?",
+                (username, password_hash, iso(), account_id),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise AccountError("That username already has an account. Choose a different username.", "username") from exc
+        deleted = await self.db.execute_on(conn, "DELETE FROM sessions WHERE account_id = ?", (account_id,))
+        result = await self.get(account_id, conn=conn)
+        assert result is not None
+        return result, deleted.rowcount
 
     async def update(self, account_id: int, *, actor: Account, name: str, note: str | None, role: str | None = None, conn: sqlite3.Connection | None = None) -> Account:
         if conn is None:
