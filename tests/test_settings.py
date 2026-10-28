@@ -109,7 +109,7 @@ async def test_prefix_survives_database_reopen_without_migration(settings_servic
     await db.connect()
     restarted = SettingsService(db, cfg, AuditService(db))
     assert await restarted.command_prefix(1) == "';--"
-    assert await db.get_meta("schema_version") == "3"
+    assert await db.get_meta("schema_version") == "4"
 
 
 @pytest.mark.parametrize("value", ["", "a b", "/", "<@123>", "<#123>", "x" * 17, 123])

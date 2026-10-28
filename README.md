@@ -94,6 +94,22 @@ Once running:
 
 ---
 
+## Sub-Account Access
+
+Console sign-in uses **username and password only**. A Discord ID associates an account with a Discord user; it is not a login credential. Discord OAuth credentials are not required, including in production.
+
+- An owner opens **Accounts → New account** and provides a Discord ID, unique username, temporary password, display name, role, and any server grants.
+- Clicking **Create account** makes the bot DM the saved username, temporary password, and `/login` link to **the new account's Discord user ID, not the admin's ID**. The user must change the temporary password before accessing the console.
+- If DM delivery cannot be confirmed, the admin receives a warning and the account remains created. Share the credentials confidentially if needed; do not create a duplicate account. Automatic DMs apply only to new account creation, not credential resets.
+- For an existing Discord-ID-only account, open its details and use **Assign credentials**. Do not create another account.
+- **Reset credentials** replaces local credentials and signs out existing sessions without changing the account's Discord association, role, status, or grants.
+
+Schema v4 automatically migrates account Discord IDs to text and enforces case-insensitive username uniqueness at startup. Back up the database before deploying; pre-existing username collisions must be reconciled explicitly.
+
+See [the authentication implementation report](docs/discord-sub-account-auth-fix.md) and [the credential DM report](docs/discord-sub-account-credential-dm.md).
+
+---
+
 ## Testing & Quality Assurance
 
 Run the automated test suite:

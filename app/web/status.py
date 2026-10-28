@@ -11,7 +11,7 @@ import time
 import zlib
 from typing import Any
 
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import web
 
 from ..services.activity import remote_ip
 from .asset_store import ASSETS, FAVICON_BYTES, FAVICON_NAME
@@ -39,7 +39,7 @@ def error_response(request: web.Request, exc: WebError) -> web.Response:
         return web.json_response({"error": "auth"}, status=401) if wants_json(request) else login_redirect(request)
     if wants_json(request):
         return web.json_response({"error": exc.error, "message": exc.message, **exc.data}, status=exc.status)
-    if request.path in ("/login", "/auth/callback"):
+    if request.path == "/login":
         from .auth import login_response
         return login_response(request, exc.message, status=exc.status)
     body = layout(title="Page not found" if exc.status == 404 else "Please try again", description=exc.message, content=error_page(exc.status, exc.message), base_url=request.app["bot"].cfg.public_base_url, path=request.path, private=True)
@@ -67,8 +67,6 @@ async def context_middleware(request: web.Request, handler):
                 sessions.clear_cookie(response)
             elif request.get("session"):
                 sessions.set_cookie(response, request.cookies[sessions.cookie_name], request["session"])
-            if request.get("clear_oauth"):
-                sessions.clear_oauth_cookie(response)
         return response
     finally:
         # Paths only: OAuth codes, old query credentials, cookies and headers stay out.
@@ -138,6 +136,7 @@ async def request_guard_middleware(request: web.Request, handler):
         return response
     await slots.acquire()
     try:
+        request["request_deadline"] = asyncio.get_running_loop().time() + request.app["request_timeout"]
         try:
             return await asyncio.wait_for(handler(request), timeout=request.app["request_timeout"])
         except asyncio.TimeoutError:
@@ -154,7 +153,7 @@ async def request_guard_middleware(request: web.Request, handler):
 async def rate_limit_middleware(request: web.Request, handler):
     ip = remote_ip(request, request.app["bot"].cfg.trust_proxy) or "unknown"
     allowed, retry = request.app["rate_bucket"].allow(ip)
-    if allowed and request.path in ("/login", "/auth/callback"):
+    if allowed and request.path == "/login":
         allowed, retry = request.app["auth_bucket"].allow(ip)
     if not allowed:
         response = error_response(request, WebError(429, "rate_limited", "Too many attempts. Wait a minute."))
@@ -201,12 +200,6 @@ async def not_found(request: web.Request) -> web.Response:
     raise WebError(404, "not_found", "That page was not found.")
 
 
-async def http_client(app: web.Application):
-    async with ClientSession(timeout=ClientTimeout(total=8)) as client:
-        app["oauth_client"] = client
-        yield
-
-
 async def shutdown_streams(app: web.Application) -> None:
     tasks = list(app["sse_tasks"])
     for task in tasks:
@@ -226,7 +219,6 @@ def create_app(bot: Any) -> web.Application:
     app["sse_slots"] = asyncio.Semaphore(8)
     app["sse_tasks"] = set()
     app["request_timeout"] = float(bot.cfg.request_timeout_s)
-    app.cleanup_ctx.append(http_client)
     app.on_shutdown.append(shutdown_streams)
     app.on_response_prepare.append(prepare_response)
     app.router.add_get("/health", health)
