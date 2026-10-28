@@ -70,24 +70,31 @@ class Database:
         meta_exists = self.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'meta'").fetchone()
         if meta_exists:
             version = self.conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-            if version and version["value"] not in ("1", "2", "3"):
+            if version and version["value"] not in ("1", "2", "3", "4"):
                 raise DatabaseError("unsupported database schema; restore compatible code and database together")
         sessions_info = {row["name"]: row for row in self.conn.execute("PRAGMA table_info(sessions)").fetchall()}
-        legacy = "DROP TABLE sessions;\n" if sessions_info and ("account_id" not in sessions_info or sessions_info.get("discord_user_id", {}).get("notnull") == 1) else ""
+        migration = "DROP TABLE sessions;\n" if sessions_info and ("account_id" not in sessions_info or sessions_info.get("discord_user_id", {}).get("notnull") == 1) else ""
         accounts_info = {row["name"]: row for row in self.conn.execute("PRAGMA table_info(accounts)").fetchall()}
+        rebuild_accounts = bool(accounts_info) and (
+            accounts_info.get("discord_user_id", {}).get("type", "").upper() != "TEXT"
+            or accounts_info.get("discord_user_id", {}).get("notnull") == 1
+        )
+        sequence = None
         if accounts_info:
-            if accounts_info.get("discord_user_id", {}).get("notnull") == 1:
-                self.conn.execute("PRAGMA foreign_keys = OFF")
-                if "username" not in accounts_info:
-                    self.conn.execute("ALTER TABLE accounts ADD COLUMN username TEXT")
-                if "password_hash" not in accounts_info:
-                    self.conn.execute("ALTER TABLE accounts ADD COLUMN password_hash TEXT")
-                if "must_change_password" not in accounts_info:
-                    self.conn.execute("ALTER TABLE accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
-                self.conn.executescript("""
-                    CREATE TABLE accounts_v3_new (
+            for name, definition in (
+                ("username", "TEXT"),
+                ("password_hash", "TEXT"),
+                ("must_change_password", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in accounts_info:
+                    migration += f"ALTER TABLE accounts ADD COLUMN {name} {definition};\n"
+            if rebuild_accounts:
+                if self.conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'sqlite_sequence'").fetchone():
+                    sequence = self.conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'accounts'").fetchone()
+                migration += """
+                    CREATE TABLE accounts_v4_new (
                       id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                      discord_user_id INTEGER UNIQUE,
+                      discord_user_id TEXT UNIQUE,
                       username        TEXT UNIQUE,
                       password_hash   TEXT,
                       must_change_password INTEGER NOT NULL DEFAULT 0,
@@ -102,25 +109,20 @@ class Database:
                       last_login_at   TEXT,
                       last_login_ip   TEXT
                     );
-                    INSERT INTO accounts_v3_new SELECT id, discord_user_id, username, password_hash, must_change_password, name, role, status, is_system, note, created_by, created_at, updated_at, last_login_at, last_login_ip FROM accounts;
+                    INSERT INTO accounts_v4_new SELECT id, CAST(discord_user_id AS TEXT), username, password_hash, must_change_password, name, role, status, is_system, note, created_by, created_at, updated_at, last_login_at, last_login_ip FROM accounts;
                     DROP TABLE accounts;
-                    ALTER TABLE accounts_v3_new RENAME TO accounts;
-                    CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts (status);
-                    CREATE INDEX IF NOT EXISTS idx_accounts_discord ON accounts (discord_user_id);
-                    CREATE INDEX IF NOT EXISTS idx_accounts_username ON accounts (username);
-                """)
-                self.conn.execute("PRAGMA foreign_keys = ON")
-            else:
-                account_cols = set(accounts_info.keys())
-                if "username" not in account_cols:
-                    self.conn.execute("ALTER TABLE accounts ADD COLUMN username TEXT")
-                if "password_hash" not in account_cols:
-                    self.conn.execute("ALTER TABLE accounts ADD COLUMN password_hash TEXT")
-                if "must_change_password" not in account_cols:
-                    self.conn.execute("ALTER TABLE accounts ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+                    ALTER TABLE accounts_v4_new RENAME TO accounts;
+                """
 
+        if rebuild_accounts:
+            # SQLite's table-rebuild procedure disables FK actions, not integrity checks.
+            self.conn.execute("PRAGMA foreign_keys = OFF")
         try:
-            self.conn.executescript("BEGIN IMMEDIATE;\n" + legacy + SCHEMA_PATH.read_text(encoding="utf-8"))
+            self.conn.executescript("BEGIN IMMEDIATE;\n" + migration + SCHEMA_PATH.read_text(encoding="utf-8"))
+            if sequence is not None:
+                cursor = self.conn.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'accounts'", (sequence["seq"],))
+                if not cursor.rowcount:
+                    self.conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('accounts', ?)", (sequence["seq"],))
             self.conn.execute("DELETE FROM meta WHERE key LIKE 'dash.jti.%'")
             if owner_ids is not None:
                 bootstrap_owners(self.conn, owner_ids)
@@ -131,7 +133,10 @@ class Database:
             self.last_write_at = iso()
         except BaseException as exc:
             self.conn.rollback()
-            raise DatabaseError("schema v3 migration / owner bootstrap failed") from exc
+            raise DatabaseError("schema v4 migration / owner bootstrap failed") from exc
+        finally:
+            if rebuild_accounts:
+                self.conn.execute("PRAGMA foreign_keys = ON")
 
     def _open(self) -> sqlite3.Connection:
         try:

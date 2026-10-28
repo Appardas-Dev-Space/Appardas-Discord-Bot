@@ -43,7 +43,7 @@ def test_invalid_port_is_rejected():
     assert "HTTP_PORT" in str(excinfo.value)
 
 
-def test_production_requires_origin_and_oauth():
+def test_production_requires_origin_but_not_discord_oauth():
     with pytest.raises(ConfigError) as excinfo:
         load_settings(
             {
@@ -52,8 +52,11 @@ def test_production_requires_origin_and_oauth():
             }
         )
     assert "PUBLIC_BASE_URL" in str(excinfo.value)
-    assert "DISCORD_CLIENT_ID" in str(excinfo.value)
-    assert "DISCORD_CLIENT_SECRET" in str(excinfo.value)
+    assert "DISCORD_CLIENT_ID" not in str(excinfo.value)
+    assert "DISCORD_CLIENT_SECRET" not in str(excinfo.value)
+    cfg = load_settings({"DISCORD_TOKEN": "x", "BOT_OWNER_IDS": "1", "PUBLIC_BASE_URL": "https://example.com"})
+    assert cfg.production and cfg.cookie_secure
+    assert cfg.discord_client_id == "" and cfg.discord_client_secret == ""
 
 
 def test_defaults_are_safe(cfg):

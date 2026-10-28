@@ -4,6 +4,7 @@ import asyncio
 import gzip
 import re
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -34,6 +35,7 @@ async def bot(cfg):
         text_channels=[SimpleNamespace(id=10, name="general")],
         roles=[SimpleNamespace(id=1, name="@everyone", position=0)],
     )
+    instance.fetch_user = AsyncMock(return_value=SimpleNamespace(name="new-account-user", send=AsyncMock()))
     yield instance
     await instance.close()
     await instance.shutdown()
@@ -58,10 +60,13 @@ async def viewer_session(bot: AppBot, *, granted: bool = True) -> tuple[object, 
     viewer = await bot.accounts.create(
         actor=owner,
         discord_user_id=123456789012345678,
+        username="viewer-one",
+        temporary_password="Temporary-viewer123!",
         name="Viewer One",
         role="viewer",
         guild_ids=[1] if granted else [],
     )
+    viewer = await bot.accounts.change_password(viewer.id, "Temporary-viewer123!", "Permanent-viewer123!")
     return viewer, await bot.sessions.create(viewer, username="viewer")
 
 
@@ -156,12 +161,12 @@ async def test_anonymous_requests_redirect_or_return_json(client):
     text = await login.text()
     assert "Sign in" in text
     assert "Accounts are created by the bot owner" in text
-    # Without configured OAuth credentials the start action explains rather than redirecting.
+    # The legacy start action cannot select a Discord sign-in method.
     assert (await client.get("/login?start=1")).status == 200
 
     callback = await client.get("/auth/callback?state=" + "a" * 43)
-    assert callback.status == 403
-    assert "took too long" in await callback.text()
+    assert callback.status == 404
+    assert "not found" in await callback.text()
 
     logout = await client.post("/logout", data={"csrf": "x"}, allow_redirects=False)
     assert logout.status == 302
@@ -303,6 +308,8 @@ async def test_account_lifecycle_and_activity_export(client, bot):
         data={
             "csrf": csrf,
             "discord_user_id": "223456789012345678",
+            "username": "operator",
+            "temporary_password": "Operator-temp123!",
             "name": "Operator",
             "role": "viewer",
             "note": "temporary",
@@ -320,11 +327,13 @@ async def test_account_lifecycle_and_activity_export(client, bot):
     text = await detail.text()
     assert "Operator" in text
     assert "Viewer One" not in text
+    assert "username and password, not Discord" in text
+    assert "Operator-temp123!" not in text
     csrf = csrf_from(text)
 
     duplicate = await client.post(
         "/dashboard/admin/accounts",
-        data={"csrf": csrf, "discord_user_id": "223456789012345678", "name": "Again", "role": "viewer"},
+        data={"csrf": csrf, "discord_user_id": "223456789012345678", "username": "operator-again", "temporary_password": "Operator-temp123!", "name": "Again", "role": "viewer"},
         headers={"Accept": "application/json"},
     )
     assert duplicate.status == 400
@@ -623,5 +632,3 @@ async def test_dashboard_announcements_and_commands(client, bot):
     assert "Command Log" in cmd_html
     assert "appardas help" in cmd_html
     assert "testuser" in cmd_html
-
-
