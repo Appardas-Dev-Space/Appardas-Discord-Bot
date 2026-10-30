@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import io
 import logging
+import re
+import secrets
+import time
 from typing import Any
 
 import discord
@@ -13,7 +18,7 @@ from aiohttp import web
 from ..services.accounts import Account, AccountError, validate_discord_id
 from ..services.activity import record_activity
 from .common import WebError, accessible_guilds, form_data, html, mutation, positive_id, wants_json
-from .templates.app.admin_accounts import accounts_page, detail_page, new_account_page
+from .templates.app.admin_accounts import accounts_page, delete_confirmation_page, detail_page, new_account_page
 from .templates.base import layout
 
 log = logging.getLogger(__name__)
@@ -21,6 +26,46 @@ log = logging.getLogger(__name__)
 CREDENTIAL_DM_TIMEOUT_S = 5.0
 CREATED_DM_MESSAGE = "Account created. The bot sent the credentials by DM to the new account's Discord user."
 CREATED_DM_WARNING = "Account created, but credentials DM delivery could not be confirmed. Ask the new user to allow DMs or share the credentials confidentially. Do not create another account."
+DELETION_CONFIRMATION_TTL_S = 300
+DELETION_CHARACTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+DELETION_TOKEN = re.compile(r"([0-9]{1,12})\.([A-HJ-NP-Z2-9]{8})\.([a-f0-9]{64})\Z")
+
+
+def _deletion_signature(request: web.Request, account_id: int, expires: str, characters: str) -> str:
+    payload = f"account.delete:{request['session'].id_hash}:{account_id}:{expires}:{characters}"
+    return hmac.new(request.app["account_deletion_key"], payload.encode(), hashlib.sha256).hexdigest()
+
+
+def _deletion_challenge(request: web.Request, target: Account) -> dict[str, Any]:
+    characters = "".join(secrets.choice(DELETION_CHARACTERS) for _ in range(8))
+    expires = str(int(time.time()) + DELETION_CONFIRMATION_TTL_S)
+    signature = _deletion_signature(request, target.id, expires, characters)
+    return {
+        "account_id": target.id, "account_name": target.name, "characters": characters,
+        "confirmation_token": f"{expires}.{characters}.{signature}",
+        "expires_in": DELETION_CONFIRMATION_TTL_S,
+    }
+
+
+def _validate_deletion_confirmation(request: web.Request, account_id: int, form: Any) -> None:
+    match = DELETION_TOKEN.fullmatch(form.get("confirmation_token", ""))
+    if match is None:
+        raise AccountError("Open Delete account to generate new confirmation characters.", "confirmation")
+    expires, characters, signature = match.groups()
+    expected = _deletion_signature(request, account_id, expires, characters)
+    if not hmac.compare_digest(signature, expected) or int(expires) <= int(time.time()):
+        raise AccountError("Confirmation expired or is invalid. Open Delete account again for new characters.", "confirmation")
+    if not hmac.compare_digest(form.get("confirmation", "").encode(), characters.encode()):
+        raise AccountError("The confirmation characters do not match. Enter them exactly as shown.", "confirmation")
+
+
+async def _deletion_target(request: web.Request, account_id: int, conn: Any) -> Account:
+    target = await request.app["bot"].accounts.get(account_id, conn=conn)
+    if target is None:
+        raise WebError(404, "not_found", "That account was not found.")
+    if target.deletion_block_reason:
+        raise AccountError(target.deletion_block_reason)
+    return target
 
 
 async def _send_credentials_dm(request: web.Request, account: Account, temporary_password: str) -> bool:
@@ -105,7 +150,8 @@ async def list_accounts(request: web.Request) -> web.Response:
     bot = request.app["bot"]
     query = {key: request.query.get(key, "")[:200] for key in ("q", "role", "status")}
     rows = await bot.accounts.list(**query)
-    content = accounts_page(rows=rows, bot=bot, query=query, total=len(rows))
+    message = "Account deleted. Its sessions and server grants were removed; activity history was kept." if request.query.get("saved") == "deleted" else ""
+    content = accounts_page(rows=rows, bot=bot, query=query, total=len(rows), csrf=request["session"].csrf, message=message)
     return await shell(request, "Accounts", content, active="accounts")
 
 
@@ -405,7 +451,64 @@ async def set_grants(request: web.Request) -> web.Response:
     return web.HTTPSeeOther(f"/dashboard/admin/accounts/{account_id}?saved=grants")
 
 
+async def delete_confirmation(request: web.Request) -> web.Response:
+    account_id = positive_id(request.match_info["account_id"])
+
+    async def operation(conn):
+        target = await _deletion_target(request, account_id, conn)
+        return _deletion_challenge(request, target)
+
+    try:
+        challenge = await mutation(request, operation)
+    except AccountError as exc:
+        return await _detail_error(request, exc.field, str(exc))
+    if wants_json(request):
+        return web.json_response(challenge, headers={"Cache-Control": "no-store"})
+    content = delete_confirmation_page(csrf=request["session"].csrf, **challenge)
+    return await shell(request, "Delete account", content, active="accounts")
+
+
+async def delete_account(request: web.Request) -> web.Response:
+    bot = request.app["bot"]
+    account_id = positive_id(request.match_info["account_id"])
+
+    async def operation(conn):
+        target = await _deletion_target(request, account_id, conn)
+        form = await form_data(request)
+        _validate_deletion_confirmation(request, account_id, form)
+        grants = [guild["id"] for guild in await bot.accounts.guilds(account_id, conn=conn)]
+        deleted, sessions = await bot.accounts.delete(account_id, actor=request["account"], conn=conn)
+        await record_activity(
+            request=request, action="account.delete", target=str(deleted.id),
+            before={
+                "discord_user_id": str(target.discord_user_id) if target.discord_user_id is not None else None,
+                "username": target.username, "name": target.name, "role": target.role, "status": target.status,
+                "guilds": grants,
+            },
+            detail={"sessions_deleted": sessions, "grants_deleted": len(grants)}, conn=conn,
+        )
+
+    try:
+        await mutation(request, operation)
+    except AccountError as exc:
+        if wants_json(request) or exc.field != "confirmation":
+            return await _detail_error(request, exc.field, str(exc))
+        row, _ = await account_rows(request)
+        content = delete_confirmation_page(
+            csrf=request["session"].csrf, error=str(exc),
+            **_deletion_challenge(request, Account.from_row(row)),
+        )
+        return await shell(request, "Delete account", content, active="accounts", status=400)
+    location = "/dashboard/admin/accounts?saved=deleted"
+    if wants_json(request):
+        return web.json_response({"redirect": location, "message": "Account deleted. Activity history was kept."})
+    return web.HTTPSeeOther(location)
+
+
 def setup_routes(app: web.Application) -> None:
+    # Short-lived signed challenges need no schema change or unbounded per-session cache.
+    # A process restart invalidates open confirmations; account IDs are never reused.
+    app["account_deletion_key"] = secrets.token_bytes(32)
     app.router.add_get("/dashboard/admin/accounts", list_accounts)
     app.router.add_get("/dashboard/admin/accounts/new", new_account)
     app.router.add_post("/dashboard/admin/accounts", create_account)
@@ -414,3 +517,5 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_post("/dashboard/admin/accounts/{account_id}/credentials", set_credentials)
     app.router.add_post("/dashboard/admin/accounts/{account_id}/status", set_status)
     app.router.add_post("/dashboard/admin/accounts/{account_id}/guilds", set_grants)
+    app.router.add_post("/dashboard/admin/accounts/{account_id}/delete/confirmation", delete_confirmation)
+    app.router.add_post("/dashboard/admin/accounts/{account_id}/delete", delete_account)

@@ -78,6 +78,14 @@ class Account:
     def can_write(self) -> bool:
         return self.status == "active" and self.role in ("admin", "owner")
 
+    @property
+    def deletion_block_reason(self) -> str:
+        if (self.username or "").lower() == "appardas-admin":
+            return "Appardas Admin is protected and cannot be deleted."
+        if self.is_system:
+            return "This owner is managed by BOT_OWNER_IDS and cannot be deleted here."
+        return ""
+
 
 def validate_discord_id(value: object) -> str:
     text = str(value)
@@ -364,6 +372,21 @@ class AccountsService:
         result = await self.get(account_id, conn=conn)
         assert result is not None
         return result, deleted
+
+    async def delete(self, account_id: int, *, actor: Account, conn: sqlite3.Connection | None = None) -> tuple[Account, int]:
+        if conn is None:
+            async with self.db.transaction() as transaction:
+                return await self.delete(account_id, actor=actor, conn=transaction)
+        await self._owner(actor, conn)
+        target = await self.get(account_id, conn=conn)
+        if target is None:
+            raise AccountError("Account not found")
+        if target.deletion_block_reason:
+            raise AccountError(target.deletion_block_reason)
+        sessions = await self.db.execute_on(conn, "DELETE FROM sessions WHERE account_id = ?", (account_id,))
+        # Foreign keys remove grants and retain history and other account rows with SET NULL.
+        await self.db.execute_on(conn, "DELETE FROM accounts WHERE id = ?", (account_id,))
+        return target, sessions.rowcount
 
     async def _validate_grants(self, guild_ids: set[int], conn: sqlite3.Connection) -> None:
         for guild_id in guild_ids:

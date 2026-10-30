@@ -17,7 +17,7 @@ SECRET_KEYS = frozenset({"password", "token", "secret", "cookie", "authorization
 ACTIVITY_ACTIONS = (
     "auth.login.success", "auth.login.denied_unknown", "auth.login.denied_suspended", "auth.login.denied_revoked",
     "auth.login.state_mismatch", "auth.login.error", "auth.logout", "auth.session.expired", "authz.denied",
-    "account.create", "account.update", "account.credentials.reset", "account.password_change", "account.suspend", "account.reactivate", "account.revoke",
+    "account.create", "account.update", "account.credentials.reset", "account.password_change", "account.suspend", "account.reactivate", "account.revoke", "account.delete",
     "account.guild.grant", "account.guild.revoke", "cog.toggle", "config.set",
 )
 

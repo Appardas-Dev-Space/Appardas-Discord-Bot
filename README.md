@@ -103,6 +103,8 @@ Console sign-in uses **username and password only**. A Discord ID associates an 
 - If DM delivery cannot be confirmed, the admin receives a warning and the account remains created. Share the credentials confidentially if needed; do not create a duplicate account. Automatic DMs apply only to new account creation, not credential resets.
 - For an existing Discord-ID-only account, open its details and use **Assign credentials**. Do not create another account.
 - **Reset credentials** replaces local credentials and signs out existing sessions without changing the account's Discord association, role, status, or grants.
+- An owner can click **Delete account** in the Accounts list or account details, enter the modal's randomly generated characters exactly, and press **Confirm deletion**. Confirmation expires after five minutes. Deletion removes credentials, sessions, and server grants while retaining activity history.
+- **Appardas Admin** (`appardas-admin`) cannot be deleted, even if its display name changes. Owners managed by `BOT_OWNER_IDS` retain their existing system-account protections.
 
 Schema v4 automatically migrates account Discord IDs to text and enforces case-insensitive username uniqueness at startup. Back up the database before deploying; pre-existing username collisions must be reconciled explicitly.
 
