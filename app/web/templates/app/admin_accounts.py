@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import urlencode
 
+from ....services.accounts import Account
 from ..base import csrf_field, e
 from ..pages import notice, select_options, title_row
 from ..widgets import stamp
@@ -28,16 +29,69 @@ def handle(bot: Any, discord_user_id: int | str | None) -> str:
     return "@" + user.name if user is not None else f"user {discord_user_id}"
 
 
-def accounts_page(*, rows: list[dict[str, Any]], bot: Any, query: dict[str, str], total: int) -> str:
+def delete_account_button(account: dict[str, Any], csrf: str) -> str:
+    return (
+        f'<form method="post" action="/dashboard/admin/accounts/{account["id"]}/delete/confirmation" '
+        f'class="delete-account-launch" data-delete-account="delete-account-modal" data-account-name="{e(account["name"])}">{csrf_field(csrf)}'
+        '<button class="danger-button" type="submit">Delete account</button></form>'
+    )
+
+
+def _deletion_form(*, csrf: str, account_id: int | None = None, account_name: str = "this account", characters: str = "", confirmation_token: str = "", modal: bool = False, error: str = "") -> str:
+    action = f"/dashboard/admin/accounts/{account_id}/delete" if account_id is not None else ""
+    cancel = (
+        '<button class="plain-button" type="button" data-delete-cancel>Cancel</button>' if modal else
+        f'<a href="/dashboard/admin/accounts/{account_id}">Cancel</a>'
+    )
+    heading = '<h2 id="delete-account-title">Delete account</h2>' if modal else ''
+    return (
+        f'<form method="post" action="{action}" class="setting-form" data-enhance data-delete-confirmation>{csrf_field(csrf)}'
+        f'<input type="hidden" name="confirmation_token" value="{e(confirmation_token)}">{heading}'
+        f'<p id="delete-account-description">To delete <strong data-delete-account-name>{e(account_name)}</strong>, '
+        'enter the random characters below and press Confirm deletion.</p>'
+        '<p class="muted">This permanently removes sign-in credentials, active sessions and server grants. '
+        'Activity history is kept. This cannot be undone.</p>'
+        f'<p class="deletion-characters"><code data-confirmation-characters>{e(characters)}</code></p>'
+        '<div class="field"><label for="delete-confirmation">Confirmation characters</label>'
+        f'<input id="delete-confirmation" name="confirmation" required minlength="8" maxlength="8" '
+        f'pattern="{e(characters or "[A-HJ-NP-Z2-9]{8}")}" autocomplete="off" autocapitalize="none" spellcheck="false" '
+        f'aria-describedby="delete-confirmation-hint"{" disabled" if modal else ""}>'
+        '<small id="delete-confirmation-hint">Enter the characters exactly as shown. They expire after 5 minutes.</small></div>'
+        f'<p class="form-status{" error" if error else ""}" role="status" data-form-status>{e(error)}</p>'
+        f'<div class="setting-actions deletion-actions">{cancel}'
+        f'<button class="danger-button" type="submit" data-confirm-delete{" disabled" if modal else ""}>Confirm deletion</button>'
+        '</div></form>'
+    )
+
+
+def delete_account_dialog(csrf: str) -> str:
+    return (
+        '<dialog id="delete-account-modal" class="account-delete-dialog" aria-labelledby="delete-account-title" '
+        'aria-describedby="delete-account-description">'
+        + _deletion_form(csrf=csrf, modal=True) + '</dialog>'
+    )
+
+
+def delete_confirmation_page(*, csrf: str, account_id: int, account_name: str, characters: str, confirmation_token: str, error: str = "", **_: Any) -> str:
+    return title_row("Delete account", account_name) + '<section class="panel">' + _deletion_form(
+        csrf=csrf, account_id=account_id, account_name=account_name, characters=characters,
+        confirmation_token=confirmation_token, error=error,
+    ) + '</section>'
+
+
+def accounts_page(*, rows: list[dict[str, Any]], bot: Any, query: dict[str, str], total: int, csrf: str, message: str = "") -> str:
     rendered = "".join(
         f'<tr><td><a href="/dashboard/admin/accounts/{row["id"]}">{e(row["name"])}</a>'
-        f'<span class="subline">{e(row.get("username") or "Credentials not assigned")} · {e(handle(bot, row["discord_user_id"]))}</span></td>'
+        f'<span class="subline">{e(row.get("username") or "Credentials not assigned")} · {e(handle(bot, row["discord_user_id"]))}</span>'
+        f'<span class="tablet-account-meta">Last sign-in: {stamp(row["last_login_at"])} · Created by: '
+        f'{e(row["creator_name"] or ("BOT_OWNER_IDS" if row["is_system"] else "—"))}</span></td>'
         f'<td data-label="Role">{role_word(row["role"])}</td>'
         f'<td data-label="Status">{status_word(row["status"])}</td>'
         f'<td data-label="Servers" class="num">{row["guild_count"]}</td>'
         f'<td data-label="Last sign-in">{stamp(row["last_login_at"])}</td>'
         f'<td data-label="Created by">{e(row["creator_name"] or ("BOT_OWNER_IDS" if row["is_system"] else "—"))}</td>'
-        f'<td><a href="/dashboard/admin/accounts/{row["id"]}">Open</a></td></tr>'
+        f'<td><div class="account-row-actions"><a href="/dashboard/admin/accounts/{row["id"]}">Open</a>'
+        f'{delete_account_button(row, csrf) if not Account.from_row(row).deletion_block_reason else ""}</div></td></tr>'
         for row in rows
     )
     filters = (
@@ -51,7 +105,7 @@ def accounts_page(*, rows: list[dict[str, Any]], bot: Any, query: dict[str, str]
         '<button class="plain-button" type="submit">Filter</button></form>'
     )
     empty = '<p class="empty">No accounts match these filters. The owner creates local sign-in credentials here.</p>' if not rows else ""
-    return title_row("Accounts", f"{total} accounts. Access is assigned here, never self-registered.", action=("New account", "/dashboard/admin/accounts/new")) + filters + '<div class="table-scroll responsive-table"><table><thead><tr><th>Name</th><th>Role</th><th>Status</th><th class="num">Servers</th><th>Last sign-in</th><th>Created by</th><th></th></tr></thead><tbody>' + rendered + '</tbody></table></div>' + empty
+    return title_row("Accounts", f"{total} accounts. Access is assigned here, never self-registered.", action=("New account", "/dashboard/admin/accounts/new")) + notice(message) + filters + '<div class="table-scroll responsive-table accounts-table"><table><thead><tr><th>Name</th><th>Role</th><th>Status</th><th class="num">Servers</th><th>Last sign-in</th><th>Created by</th><th></th></tr></thead><tbody>' + rendered + '</tbody></table></div>' + empty + delete_account_dialog(csrf)
 
 
 def guild_choices(guilds: list[dict[str, Any]], selected: set[int], *, csrf: str, writable: bool = True) -> str:
@@ -202,4 +256,16 @@ def detail_page(*, account: dict[str, Any], bot: Any, guilds: list[dict[str, Any
         '<div class="table-scroll responsive-table"><table><thead><tr><th>Time</th><th>Action</th><th>Result</th><th>Change</th></tr></thead>'
         f'<tbody>{recent}</tbody></table></div>{empty_activity}</section>'
     )
-    return title + notice(message) + '<div class="stack">' + identity + credentials + role_form + access + danger + activity + '</div>'
+    blocked = Account.from_row(account).deletion_block_reason
+    deletion = '<section class="panel"><h2>Delete account</h2>'
+    if blocked:
+        deletion += f'<p class="muted">{e(blocked)}</p></section>'
+    else:
+        deletion += (
+            '<p class="muted">Permanently remove this account, its sign-in credentials, sessions and server grants. '
+            'Activity history is kept. This cannot be undone.</p>'
+            f'<p class="field-error">{e(errors.get("confirmation", ""))}</p>'
+            f'<div class="setting-actions">{delete_account_button(account, csrf)}</div></section>'
+            + delete_account_dialog(csrf)
+        )
+    return title + notice(message) + '<div class="stack">' + identity + credentials + role_form + access + danger + activity + deletion + '</div>'

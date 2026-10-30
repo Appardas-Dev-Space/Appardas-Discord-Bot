@@ -16,13 +16,104 @@
     try { await navigator.clipboard.writeText(button.dataset.copy); say('Copied.'); }
     catch { say('Select the ID to copy it.'); }
   }));
+  const updateDeletionConfirmation = form => {
+    if (!form.matches('[data-delete-confirmation]')) return;
+    const input = form.elements.confirmation;
+    const characters = form.querySelector('[data-confirmation-characters]').textContent;
+    const matches = !!characters && !!form.elements.confirmation_token.value && input.value === characters;
+    input.setCustomValidity(input.value && !matches ? 'Enter the confirmation characters exactly as shown.' : '');
+    form.querySelector('[data-confirm-delete]').disabled = !matches || input.disabled || form.getAttribute('aria-busy') === 'true';
+  };
+  all('[data-delete-confirmation]').forEach(form => {
+    form.elements.confirmation.addEventListener('input', () => updateDeletionConfirmation(form));
+    updateDeletionConfirmation(form);
+  });
+  all('.account-delete-dialog').forEach(dialog => {
+    if (typeof dialog.showModal !== 'function') return; // The POST confirmation page is the fallback.
+    const confirmation = dialog.querySelector('[data-delete-confirmation]');
+    const input = confirmation.elements.confirmation;
+    const status = confirmation.querySelector('[data-form-status]');
+    let controller = null, opener = null;
+    const reset = () => {
+      input.value = '';
+      input.disabled = true;
+      confirmation.action = '';
+      confirmation.elements.confirmation_token.value = '';
+      confirmation.querySelector('[data-delete-account-name]').textContent = 'this account';
+      confirmation.querySelector('[data-confirmation-characters]').textContent = '';
+      status.classList.remove('error');
+      status.textContent = '';
+      updateDeletionConfirmation(confirmation);
+    };
+    const abortChallenge = () => {
+      controller?.abort();
+      controller = null;
+      dialog.removeAttribute('aria-busy');
+      if (opener) opener.disabled = false;
+    };
+    dialog.querySelector('[data-delete-cancel]').addEventListener('click', () => {
+      abortChallenge();
+      dialog.close();
+    });
+    dialog.addEventListener('cancel', event => {
+      if (confirmation.getAttribute('aria-busy') === 'true') event.preventDefault();
+      else abortChallenge();
+    });
+    dialog.addEventListener('close', () => {
+      if (dialog.open) return; // A queued close from an older opening must not clear a new challenge.
+      abortChallenge();
+      reset();
+      if (opener) opener.focus();
+    });
+    all(`[data-delete-account="${dialog.id}"]`).forEach(launch => launch.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (dialog.open) return;
+      opener = launch.querySelector('button[type=submit]');
+      reset();
+      confirmation.querySelector('[data-delete-account-name]').textContent = launch.dataset.accountName;
+      dialog.showModal();
+      dialog.setAttribute('aria-busy', 'true');
+      opener.disabled = true;
+      status.textContent = 'Generating confirmation characters…';
+      const request = new AbortController();
+      controller = request;
+      try {
+        const body = new URLSearchParams(new FormData(launch));
+        const response = await fetch(launch.action, {method: 'POST', body, credentials: 'same-origin', signal: request.signal, headers: {Accept: 'application/json', 'X-CSRF-Token': body.get('csrf')}});
+        const data = await response.json();
+        if (response.status === 401) { location.assign(`/login?next=${encodeURIComponent(location.pathname)}`); return; }
+        if (!response.ok) throw new Error(data.message || 'Could not generate confirmation characters. Cancel and try again.');
+        if (controller !== request || !dialog.open) return;
+        confirmation.action = `/dashboard/admin/accounts/${data.account_id}/delete`;
+        confirmation.elements.confirmation_token.value = data.confirmation_token;
+        confirmation.querySelector('[data-delete-account-name]').textContent = data.account_name;
+        confirmation.querySelector('[data-confirmation-characters]').textContent = data.characters;
+        input.pattern = data.characters;
+        input.disabled = false;
+        status.textContent = '';
+        updateDeletionConfirmation(confirmation);
+        input.focus();
+      } catch (error) {
+        if (error.name !== 'AbortError' && controller === request && dialog.open) {
+          status.classList.add('error');
+          status.textContent = error.message || 'Could not generate confirmation characters. Cancel and try again.';
+        }
+      } finally {
+        if (controller === request) {
+          controller = null;
+          dialog.removeAttribute('aria-busy');
+          opener.disabled = false;
+        }
+      }
+    }));
+  });
   all('[data-enhance]').forEach(form => form.addEventListener('submit', async event => {
     event.preventDefault();
     const body = new URLSearchParams(new FormData(form));
     if (event.submitter?.name) body.set(event.submitter.name, event.submitter.value);
     const buttons = all('button', form);
     const status = form.querySelector('[data-form-status]') || notice;
-    if (status) status.textContent = 'Saving…';
+    if (status) status.textContent = form.matches('[data-delete-confirmation]') ? 'Deleting account…' : 'Saving…';
     form.setAttribute('aria-busy', 'true');
     buttons.forEach(button => { button.disabled = true; });
     try {
@@ -55,6 +146,7 @@
     } finally {
       form.removeAttribute('aria-busy');
       buttons.forEach(button => { button.disabled = false; });
+      updateDeletionConfirmation(form);
     }
   }));
   // Activity is a stable document. Guild screens receive committed changes.
